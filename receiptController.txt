@@ -1,0 +1,33 @@
+let donations = []; // Yeh aap real data source se le sakte hain, yeh sirf example ke liye hai.
+
+function generateReceiptCode() {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let code;
+  do {
+    code = '';
+    for (let i = 0; i < 6; i++) {
+      code += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+  } while (donations.some(d => d.receiptCode === code));
+  return code;
+}
+
+function addOrApproveDonation(donation) {
+  if (!donation.receiptCode) {
+    donation.receiptCode = generateReceiptCode();
+  }
+  donation.approved = true;
+
+  const idx = donations.findIndex(d => d.id === donation.id);
+  if (idx !== -1) {
+    donations[idx] = donation;
+  } else {
+    donations.push(donation);
+  }
+}
+
+module.exports = {
+  generateReceiptCode,
+  addOrApproveDonation,
+  donations // export karke baki backend me share bhi kar sakte hain
+};

@@ -1,0 +1,37 @@
+{
+  "users": [
+    {
+      "id": 1,
+      "username": "priyansh singh",
+      "passwordHash": "$2b$10$Y5gpfSdpa8n.0EHxjhVgKezNdvujL2XNZLQhK9Yq/EVv//B32qiGG",
+      "role": "mainadmin",
+      "banned": false,
+      "loggedIn": "adminweb"
+    },
+    {
+      "id": 2,
+      "username": "id",
+      "role": "user",
+      "banned": false,
+      "passwordHash": "$2b$10$v39hLxAYFSY3LSUd/iIZ.udb2jQDp7tOHyNwkpNyrN1XHw7w5X.U.",
+      "loggedIn": "device001"
+    },
+    {
+      "id": 3,
+      "username": "id1",
+      "role": "admin",
+      "banned": false,
+      "passwordHash": "$2b$10$LvCeZDVNvc5iZv.zxjfPoOBd9vkwgTAw3zaieRpCDoxObr138FZvS",
+      "loggedIn": "device001"
+    },
+    {
+      "id": 4,
+      "username": "q",
+      "role": "user",
+      "banned": false,
+      "passwordHash": "$2b$10$z6yWiAzzmuiTwBhiiRCcTu.9YJkgUKOoltP1wC0h9NCs23upWh5sq"
+    }
+  ],
+  "gallery": [],
+  "pending": []
+}
