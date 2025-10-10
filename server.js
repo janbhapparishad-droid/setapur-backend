@@ -118,6 +118,41 @@ const uploadRootGallery = multer({
 
 const SECRET_KEY = process.env.JWT_SECRET || 'your_secret_key_here';
 
+/* ===================== Startup admin auto-seed (no shell needed) ===================== */
+(function seedAdmin() {
+  try {
+    const users = (getUsers && getUsers()) || [];
+    const username = process.env.INIT_ADMIN_USERNAME || 'admin';
+    const password = process.env.INIT_ADMIN_PASSWORD || 'Admin@123';
+    const role = 'mainadmin';
+
+    const resetFlag = String(process.env.INIT_ADMIN_RESET || '').toLowerCase();
+    const shouldReset = resetFlag === '1' || resetFlag === 'true';
+
+    const idx = Array.isArray(users) ? users.findIndex(u => String(u.username) === String(username)) : -1;
+
+    if (idx === -1) {
+      const id = (Array.isArray(users) ? users.reduce((m,u)=>Math.max(m, Number(u.id)||0),0) : 0) + 1;
+      const hash = bcrypt.hashSync(password, 10);
+      const next = Array.isArray(users) ? users.slice() : [];
+      next.push({ id, username, passwordHash: hash, role, banned: false });
+      saveUsers(next);
+      console.log(`Seeded admin user '${username}'`);
+    } else if (shouldReset) {
+      const next = users.slice();
+      next[idx].passwordHash = bcrypt.hashSync(password, 10);
+      next[idx].role = role;
+      next[idx].banned = false;
+      saveUsers(next);
+      console.log(`Reset admin user '${username}'`);
+    } else {
+      console.log(`Admin user '${username}' already exists; skipping seed`);
+    }
+  } catch (e) {
+    console.warn('Admin seed skipped:', e.message);
+  }
+})();
+
 /* ===================== Auth middleware (Option 2) ===================== */
 function normRole(r) {
   return String(r || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
@@ -1602,8 +1637,8 @@ app.delete('/gallery/folders/:slug/images', authRole(['admin', 'mainadmin']), (r
 
     res.json({ ok: true, filename });
   } catch (e) {
-    console.error('delete image error:', e);
-    res.status(500).send('Failed to delete image');
+    console.error('ebooks delete file error:', e);
+    res.status(500).send('Failed to delete file');
   }
 });
 
@@ -1673,7 +1708,7 @@ function rootRenameHandler(req, res) {
     res.json({ ok: true, filename: targetName, url: `${host}/uploads/gallery/${encodeURIComponent(targetName)}` });
   } catch (e) {
     console.error('rename root image error:', e);
-    res.status(500).send('Failed to rename root image');
+    res.status(500).send('Failed to rename image');
   }
 }
 app.post('/gallery/images/rename', authRole(['admin', 'mainadmin']), rootRenameHandler);
@@ -1694,7 +1729,7 @@ function rootDeleteHandler(req, res) {
     res.json({ ok: true, filename });
   } catch (e) {
     console.error('delete root image error:', e);
-    res.status(500).send('Failed to delete root image');
+    res.status(500).send('Failed to delete file');
   }
 }
 app.delete('/gallery/images', authRole(['admin', 'mainadmin']), rootDeleteHandler);
@@ -2209,10 +2244,9 @@ app.get('/admin/whoami', authRole(['admin','mainadmin']), (req, res) => {
 });
 
 /* ===================== Start server (Render compatible) ===================== */
-// Health check (for uptime/monitoring)
+// Health check (for monitoring)
 app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
 
-// Dynamic PORT + 0.0.0.0 (required by Render and most PaaS)
 const PORT = process.env.PORT || 3000;
 const HOST = '0.0.0.0';
 app.listen(PORT, HOST, () => {
