@@ -1,4 +1,4 @@
-﻿/* --- server.js (FULL with expenses v2 + donation search + gallery + eBooks, Option 2 auth + alias approve) --- */
+﻿/* --- server.js (FULL: existing APIs + Setapur AI /ai/chat) --- */
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -31,6 +31,12 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
+
+// Request log (path confirm) — add after app.use(bodyParser.json())
+app.use((req, res, next) => {
+  console.log(new Date().toISOString(), req.method, req.originalUrl);
+  next();
+});
 
 // Dev helper: allow ?token=... as Authorization
 app.use((req, res, next) => {
@@ -1051,6 +1057,77 @@ app.post('/auth/login', async (req, res) => {
   const token = jwt.sign({ id: user.id, username: user.username, role: cleanRole }, SECRET_KEY, { expiresIn: '8h' });
   res.json({ token });
 });
+
+/* ===================== Setapur AI (/ai/chat) ===================== */
+// Quick ping to verify AI section is mounted
+app.get('/ai/ping', (req, res) => {
+  res.json({ ok: true, provider: process.env.AI_PROVIDER || 'groq', ts: Date.now() });
+});
+
+/* Env:
+   AI_PROVIDER=groq
+   AI_MODEL=llama3-8b-8192
+   GROQ_API_KEY=your_groq_api_key
+*/
+const AI_PROVIDER = process.env.AI_PROVIDER || 'groq';
+const AI_MODEL    = process.env.AI_MODEL    || 'llama3-8b-8192';
+const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
+
+function aiNormalizeMessages(messages = [], system = '') {
+  const out = [];
+  if (system && String(system).trim()) out.push({ role: 'system', content: String(system).trim() });
+  for (const m of (messages || [])) {
+    const role = (m && ['user','assistant','system'].includes(m.role)) ? m.role : 'user';
+    const content = ((m && m.content) || '').toString();
+    if (content.trim()) out.push({ role, content });
+  }
+  return out;
+}
+
+async function aiCallGroq({ messages, system }) {
+  if (!GROQ_API_KEY) throw new Error('Missing GROQ_API_KEY');
+  const url = 'https://api.groq.com/openai/v1/chat/completions';
+  const body = {
+    model: AI_MODEL,
+    messages: aiNormalizeMessages(messages, system),
+    temperature: 0.6,
+    top_p: 0.9,
+    stream: false,
+  };
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`Groq ${res.status}: ${txt}`);
+  }
+  const data = await res.json();
+  const content = data?.choices?.[0]?.message?.content?.trim() || '';
+  if (!content) throw new Error('Empty AI response');
+  return content;
+}
+
+async function aiChatHandler(req, res) {
+  try {
+    if (AI_PROVIDER !== 'groq') {
+      return res.status(500).json({ error: `Unsupported AI_PROVIDER=${AI_PROVIDER}` });
+    }
+    const { messages = [], system = '' } = req.body || {};
+    const content = await aiCallGroq({ messages, system });
+    res.json({ content });
+  } catch (e) {
+    console.error('AI chat error:', e);
+    res.status(500).json({ error: e.message || String(e) });
+  }
+}
+
+// Mount both paths so FE mismatch na ho
+app.post('/ai/chat', authRole(['user','admin','mainadmin']), aiChatHandler);
+app.post('/api/ai/chat', authRole(['user','admin','mainadmin']), aiChatHandler);
+/* ===================== Setapur AI end ===================== */
+
 
 /* ===================== Analytics summary (event-wise) ===================== */
 app.get('/analytics/summary', authRole(['user','admin','mainadmin']), (req, res) => {
