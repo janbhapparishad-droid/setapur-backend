@@ -1070,7 +1070,7 @@ app.get('/ai/ping', (req, res) => {
    GROQ_API_KEY=your_groq_api_key
 */
 const AI_PROVIDER = process.env.AI_PROVIDER || 'groq';
-const AI_MODEL    = process.env.AI_MODEL    || 'llama3-8b-8192';
+const AI_MODEL    = process.env.AI_MODEL;
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 
 function aiNormalizeMessages(messages = [], system = '') {
