@@ -8,13 +8,17 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const crypto = require('crypto');
+const { Pool } = require('pg'); // Postgres (Neon)
+const cloudinary = require('cloudinary').v2; // Cloudinary for persistent uploads
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
 
 // Donations (source of truth you already have)
 const { addOrApproveDonation, donations, saveDonations } = require('./controllers/receiptController');
 
 // Routers/models you already have
 const adminRoutes = require('./routes/adminRoutes');
-const { getUsers, saveUsers } = require('./models/jsonDb');
+// NOTE: jsonDb (file-based) ko replace kar rahe hain Postgres se (inline functions below).
+// const { getUsers, saveUsers } = require('./models/jsonDb');
 const categoryRoutes = require('./routes/categoryRoutes');
 
 // Analytics admin + store
@@ -46,7 +50,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// Static uploads
+// ============== Persistent Upload roots (Gallery/Ebooks use local FS; donations use Cloudinary) ==============
 const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 app.use('/uploads', express.static(uploadsDir));
@@ -55,17 +59,101 @@ app.use('/uploads', express.static(uploadsDir));
 const galleryDir = path.join(uploadsDir, 'gallery');
 if (!fs.existsSync(galleryDir)) fs.mkdirSync(galleryDir, { recursive: true });
 
-// Multer for generic screenshot upload
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadsDir),
-  filename: (req, file, cb) => {
-    const unique = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    cb(null, unique + path.extname(file.originalname));
+/* ===================== Users (Neon Postgres) ===================== */
+// Pool to Neon (DATABASE_URL must include ?sslmode=require)
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { require: true, rejectUnauthorized: false },
+});
+async function ensureUsersTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      username TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'user',
+      banned BOOLEAN NOT NULL DEFAULT FALSE,
+      name TEXT,
+      full_name TEXT,
+      display_name TEXT,
+      logged_in TEXT,
+      created_at TIMESTAMPTZ DEFAULT now()
+    );
+  `);
+  console.log('DB ready: users table ensured');
+}
+function rowToUser(r) {
+  return {
+    id: r.id,
+    username: r.username,
+    passwordHash: r.password_hash,
+    role: r.role,
+    banned: r.banned,
+    name: r.name || null,
+    fullName: r.full_name || null,
+    displayName: r.display_name || null,
+    loggedIn: r.logged_in || null,
+    createdAt: r.created_at,
+  };
+}
+async function getUsers() {
+  await ensureUsersTable();
+  const { rows } = await pool.query(`
+    SELECT id, username, password_hash, role, banned, name, full_name, display_name, logged_in, created_at
+    FROM users ORDER BY id ASC
+  `);
+  return rows.map(rowToUser);
+}
+async function saveUsers(users) {
+  await ensureUsersTable();
+  if (!Array.isArray(users)) return;
+  for (const u of users) {
+    let passwordHash = u.passwordHash || null;
+    if (u.password && String(u.password).trim()) {
+      passwordHash = bcrypt.hashSync(u.password, 10);
+      delete u.password;
+    }
+    await pool.query(
+      `INSERT INTO users (username, password_hash, role, banned, name, full_name, display_name, logged_in)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       ON CONFLICT (username) DO UPDATE SET
+         password_hash = COALESCE(EXCLUDED.password_hash, users.password_hash),
+         role = EXCLUDED.role,
+         banned = EXCLUDED.banned,
+         name = EXCLUDED.name,
+         full_name = EXCLUDED.full_name,
+         display_name = EXCLUDED.display_name,
+         logged_in = EXCLUDED.logged_in`,
+      [
+        u.username,
+        passwordHash,
+        String(u.role || 'user'),
+        !!u.banned,
+        u.name || null,
+        u.fullName || null,
+        u.displayName || null,
+        u.loggedIn || null,
+      ]
+    );
+  }
+}
+
+/* ===================== Multer for donation screenshot (Cloudinary) ===================== */
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key:    process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+const donationScreenshotStorage = new CloudinaryStorage({
+  cloudinary,
+  params: {
+    folder: 'setapur/screenshots',
+    allowed_formats: ['jpg','jpeg','png','webp','gif'],
   },
 });
-const upload = multer({ storage });
+const upload = multer({ storage: donationScreenshotStorage }); // used for donation screenshot uploads
 
-// ========== Multer for gallery uploads ==========
+// ========== Multer for gallery uploads (still local FS; move to cloud later if needed) ==========
 const IMG_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp']);
 const GALLERY_ALLOWED_EXTS = IMG_EXT;
 
@@ -124,10 +212,10 @@ const uploadRootGallery = multer({
 
 const SECRET_KEY = process.env.JWT_SECRET || 'your_secret_key_here';
 
-/* ===================== Startup admin auto-seed (no shell needed) ===================== */
-(function seedAdmin() {
+/* ===================== Startup admin auto-seed (PG) ===================== */
+async function seedAdmin() {
   try {
-    const users = (getUsers && getUsers()) || [];
+    const users = await getUsers();
     const username = process.env.INIT_ADMIN_USERNAME || 'admin';
     const password = process.env.INIT_ADMIN_PASSWORD || 'Admin@123';
     const role = 'mainadmin';
@@ -138,18 +226,16 @@ const SECRET_KEY = process.env.JWT_SECRET || 'your_secret_key_here';
     const idx = Array.isArray(users) ? users.findIndex(u => String(u.username) === String(username)) : -1;
 
     if (idx === -1) {
-      const id = (Array.isArray(users) ? users.reduce((m,u)=>Math.max(m, Number(u.id)||0),0) : 0) + 1;
-      const hash = bcrypt.hashSync(password, 10);
       const next = Array.isArray(users) ? users.slice() : [];
-      next.push({ id, username, passwordHash: hash, role, banned: false });
-      saveUsers(next);
+      next.push({ username, password, role, banned: false });
+      await saveUsers(next);
       console.log(`Seeded admin user '${username}'`);
     } else if (shouldReset) {
       const next = users.slice();
-      next[idx].passwordHash = bcrypt.hashSync(password, 10);
+      next[idx].password = password;
       next[idx].role = role;
       next[idx].banned = false;
-      saveUsers(next);
+      await saveUsers(next);
       console.log(`Reset admin user '${username}'`);
     } else {
       console.log(`Admin user '${username}' already exists; skipping seed`);
@@ -157,7 +243,7 @@ const SECRET_KEY = process.env.JWT_SECRET || 'your_secret_key_here';
   } catch (e) {
     console.warn('Admin seed skipped:', e.message);
   }
-})();
+}
 
 /* ===================== Auth middleware (Option 2) ===================== */
 function normRole(r) {
@@ -165,7 +251,7 @@ function normRole(r) {
 }
 function authRole(roles) {
   const allowed = (Array.isArray(roles) ? roles : [roles]).map(normRole);
-  return (req, res, next) => {
+  return async (req, res, next) => {
     const header = req.headers['authorization'];
     if (!header) return res.status(401).send('Access Denied');
     try {
@@ -179,7 +265,7 @@ function authRole(roles) {
         return res.status(403).send('Forbidden');
       }
       try {
-        const users = getUsers();
+        const users = await getUsers();
         const u = users.find(u => String(u.username) === req.user.username);
         if (u && (u.banned === true || u.banned === 'true' || u.banned === 1 || u.banned === '1')) {
           return res.status(403).send('User banned');
@@ -714,10 +800,9 @@ function createDonationHandler(req, res) {
 
     const code = generateUniqueReceiptCode();
 
-    const fileName = req.file ? req.file.filename : null;
-    const screenshotPath = fileName ? `uploads/${fileName}` : null;
-    const host = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
-    const screenshotUrl = fileName ? `${host}/uploads/${fileName}` : null;
+    // Cloudinary upload handled by multer; get URL + public_id
+    const screenshotUrl = req.file?.path || null;      // Cloudinary https URL
+    const screenshotPath = req.file?.filename || null; // Cloudinary public_id (for reference)
 
     const donorUsername = req.user.username;
     const donorUserId = req.user.id;
@@ -852,7 +937,7 @@ app.get('/admin/donations/pending', authRole(['admin', 'mainadmin']), (req, res)
 });
 
 // Admin approve a donation (enforces 6-char alphanumeric code)
-app.post('/admin/donations/:id/approve', authRole(['admin', 'mainadmin']), (req, res) => {
+app.post('/admin/donations/:id/approve', authRole(['admin', 'mainadmin']), async (req, res) => {
   try {
     const { id } = req.params;
     const idx = donations.findIndex((x) => String(x.id) === String(id));
@@ -863,7 +948,7 @@ app.post('/admin/donations/:id/approve', authRole(['admin', 'mainadmin']), (req,
 
     let approvedByName = req.user.username;
     try {
-      const users = getUsers();
+      const users = await getUsers();
       const approver = users.find((u) => u.username === req.user.username);
       approvedByName = approver?.name || approver?.fullName || approver?.displayName || req.user.username;
     } catch (_) {}
@@ -972,7 +1057,7 @@ app.put('/admin/donations/:id', authRole(['admin', 'mainadmin']), handleDonation
 app.put('/api/donations/:id', authRole(['admin', 'mainadmin']), handleDonationUpdate);
 
 // Alias: approve/disapprove via single endpoint (kept for your FE call)
-app.post('/api/donations/approve', authRole(['admin','mainadmin']), (req, res) => {
+app.post('/api/donations/approve', authRole(['admin','mainadmin']), async (req, res) => {
   try {
     const { id, approve } = req.body || {};
     if (!id) return res.status(400).json({ error: 'id required' });
@@ -988,7 +1073,7 @@ app.post('/api/donations/approve', authRole(['admin','mainadmin']), (req, res) =
 
       let approvedByName = req.user.username;
       try {
-        const users = getUsers();
+        const users = await getUsers();
         const approver = users.find(u => u.username === req.user.username);
         approvedByName = approver?.name || approver?.fullName || approver?.displayName || req.user.username;
       } catch (_) {}
@@ -1044,14 +1129,14 @@ app.post('/api/donations/approve', authRole(['admin','mainadmin']), (req, res) =
 /* ===================== Auth: Login (role normalized) ===================== */
 app.post('/auth/login', async (req, res) => {
   const { username, password, deviceId } = req.body || {};
-  const users = getUsers();
+  const users = await getUsers();
   const user = users.find((u) => u.username === username);
   if (!user) return res.status(400).send('User not found');
   if (user.banned) return res.status(403).send('User banned');
   const validPass = await bcrypt.compare(password, user.passwordHash);
   if (!validPass) return res.status(400).send('Invalid password');
 
-  user.loggedIn = deviceId; saveUsers(users);
+  user.loggedIn = deviceId; await saveUsers(users);
 
   const cleanRole = normRole(user.role || 'user');
   const token = jwt.sign({ id: user.id, username: user.username, role: cleanRole }, SECRET_KEY, { expiresIn: '8h' });
@@ -2320,12 +2405,23 @@ app.get('/admin/whoami', authRole(['admin','mainadmin']), (req, res) => {
   res.json(req.user);
 });
 
-/* ===================== Start server (Render compatible) ===================== */
+/* ===================== Health + Start ===================== */
 // Health check (for monitoring)
 app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
 
 const PORT = process.env.PORT || 3000;
 const HOST = '0.0.0.0';
-app.listen(PORT, HOST, () => {
-  console.log(`Server listening on http://${HOST}:${PORT}`);
-});
+
+async function start() {
+  try {
+    await ensureUsersTable();
+    await seedAdmin();
+    app.listen(PORT, HOST, () => {
+      console.log(`Server listening on http://${HOST}:${PORT}`);
+    });
+  } catch (e) {
+    console.error('Startup failed:', e);
+    process.exit(1);
+  }
+}
+start();

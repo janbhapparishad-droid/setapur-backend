@@ -1,0 +1,80 @@
+// db.js
+const { Pool } = require('pg');
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { require: true, rejectUnauthorized: false },
+});
+
+const q = (text, params) => pool.query(text, params);
+
+async function initDb() {
+  // Users
+  await q(`
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      username TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'user',
+      banned BOOLEAN NOT NULL DEFAULT FALSE,
+      name TEXT,
+      full_name TEXT,
+      display_name TEXT,
+      logged_in TEXT
+    );
+  `);
+
+  // Expenses
+  await q(`
+    CREATE TABLE IF NOT EXISTS expenses (
+      id SERIAL PRIMARY KEY,
+      amount NUMERIC(12,2) NOT NULL,
+      category TEXT NOT NULL,
+      description TEXT,
+      paid_to TEXT,
+      date TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      approved BOOLEAN NOT NULL DEFAULT FALSE,
+      status TEXT NOT NULL DEFAULT 'pending',
+      submitted_by TEXT,
+      submitted_by_id INTEGER,
+      approved_by TEXT,
+      approved_by_id INTEGER,
+      approved_at TIMESTAMPTZ
+    );
+  `);
+
+  // Donations
+  await q(`
+    CREATE TABLE IF NOT EXISTS donations (
+      id SERIAL PRIMARY KEY,
+      donor_user_id INTEGER,
+      donor_username TEXT,
+      donor_name TEXT,
+      amount NUMERIC(12,2) NOT NULL,
+      payment_method TEXT,
+      category TEXT,
+      cash_receiver_name TEXT,
+      approved BOOLEAN NOT NULL DEFAULT FALSE,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ,
+      screenshot_url TEXT,
+      screenshot_path TEXT,
+      receipt_code TEXT UNIQUE,
+      approved_by TEXT,
+      approved_by_id INTEGER,
+      approved_by_role TEXT,
+      approved_by_name TEXT,
+      approved_at TIMESTAMPTZ
+    );
+  `);
+
+  // Helpful indexes
+  await q(`CREATE INDEX IF NOT EXISTS idx_expenses_category ON expenses(category);`);
+  await q(`CREATE INDEX IF NOT EXISTS idx_donations_category ON donations(category);`);
+}
+
+module.exports = { pool, q, initDb };
