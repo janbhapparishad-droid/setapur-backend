@@ -1,4 +1,4 @@
-/* --- server.js (Option B with fixes: Postgres + Cloudinary; alias handler fixes + ALTERs) --- */
+﻿/* --- server.js (Option B with fixes: Postgres + Cloudinary; alias handler fixes + ALTERs) --- */
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -537,7 +537,7 @@ app.post('/api/expenses/submit', authRole(['user','admin','mainadmin']), async (
       pushNotification(e.submittedBy, {
         type: 'expenseSubmit',
         title: 'Expense submitted',
-        body: `${e.category} � ?${e.amount} (pending approval)`,
+        body: `${e.category} • ₹${e.amount} (pending approval)`,
         data: { id: e.id, category: e.category, amount: e.amount, approved: false },
       });
     }
@@ -638,7 +638,7 @@ app.post('/admin/expenses/:id/approve', authRole(['admin','mainadmin']), async (
       pushNotification(who, {
         type: `expense${approve ? 'Approval' : 'Pending'}`,
         title: `Expense ${approve ? 'approved' : 'set to pending'}`,
-        body: `${e.category} � ?${e.amount}`,
+        body: `${e.category} • ₹${e.amount}`,
         data: { id: e.id, category: e.category, approved: approve },
       });
     }
@@ -895,7 +895,7 @@ app.post('/admin/donations/:id/approve', authRole(['admin', 'mainadmin']), async
         pushNotification(donorUser, {
           type: 'donationApproval',
           title: 'Donation approved',
-          body: `Receipt: ${rcOut || 'N/A'} � Event: ${out.category} � Amount: ?${pgNum(out.amount)}`,
+          body: `Receipt: ${rcOut || 'N/A'} • Event: ${out.category} • Amount: ₹${pgNum(out.amount)}`,
           data: { receiptCode: rcOut || null, category: out.category, amount: out.amount, paymentMethod: out.paymentMethod, approved: true },
         });
       }
@@ -2114,4 +2114,3 @@ app.post('/analytics/admin/events/reorder', authRole(['admin','mainadmin']), asy
   } catch (e){ console.error(e); res.status(500).send('Reorder failed'); }
 });
 /* === End Injected: Analytics Admin (DB-based) === */
-
