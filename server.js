@@ -1,47 +1,48 @@
-﻿/* --- server.js (FULL with expenses v2 + donation search + gallery + eBooks, Option 2 auth + alias approve) --- */
+﻿/* --- server.js (Option B: Postgres + Cloudinary; persistent for expenses/donations/gallery/ebooks/categories) --- */
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const path = require('path');
-const fs = require('fs');
+const fs = require('fs'); // optional; used only in a few places
 const multer = require('multer');
 const crypto = require('crypto');
-const { Pool } = require('pg');                 // Postgres for persistent users
-const cloudinary = require('cloudinary').v2;    // Cloudinary for donation screenshots
+const { Pool } = require('pg');
+const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 
-// Donations (source of truth you already have)
-const { addOrApproveDonation, donations, saveDonations } = require('./controllers/receiptController');
+// Optional routers you already had
+let adminRoutes = null;
+try { adminRoutes = require('./routes/adminRoutes'); } catch { console.warn('routes/adminRoutes not found'); }
+let categoryRoutes = null;
+try { categoryRoutes = require('./routes/categoryRoutes'); } catch { console.warn('routes/categoryRoutes not found'); }
 
-// Routers/models you already have
-const adminRoutes = require('./routes/adminRoutes');
-// NOTE: jsonDb (file-based) ko replace kiya gaya hai Postgres-backed functions se (neeche).
-const categoryRoutes = require('./routes/categoryRoutes');
-
-// Analytics admin + store
-const analyticsAdminRoutes = require('./routes/analyticsAdminRoutes');
-const { readFolders, writeFolders } = require('./models/analyticsStore');
-
-// Optional analytics/totals routers
+let analyticsAdminRoutes = null;
+try { analyticsAdminRoutes = require('./routes/analyticsAdminRoutes'); } catch { console.warn('routes/analyticsAdminRoutes not found'); }
 let analyticsRoutes = null;
 let totalsRoutes = null;
 try { analyticsRoutes = require('./routes/analyticsRoutes'); } catch { console.warn('routes/analyticsRoutes.js not found, skipping.'); }
-try { totalsRoutes = require('./routes/totalsRoutes'); } catch { console.warn('routes/totalsRoutes.js not found, using fallback /totals.'); }
+try { totalsRoutes = require('./routes/totalsRoutes'); } catch { console.warn('routes/totalsRoutes.js not found, using DB-based /totals.'); }
+
+// Optional store (if your admin uses it for events/folders config). Safe to keep.
+let readFolders = () => []; let writeFolders = () => {};
+try {
+  ({ readFolders, writeFolders } = require('./models/analyticsStore'));
+} catch { console.warn('models/analyticsStore not found; analytics summary will still work via DB sums.'); }
 
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// Request log (helpful for debugging)
+// Request log
 app.use((req, res, next) => {
   console.log(new Date().toISOString(), req.method, req.originalUrl);
   next();
 });
 
-// Dev helper: allow ?token=... as Authorization
+// Dev helper: allow ?token=...
 app.use((req, res, next) => {
   if (!req.headers.authorization && req.query && req.query.token) {
     req.headers.authorization = `Bearer ${req.query.token}`;
@@ -49,206 +50,28 @@ app.use((req, res, next) => {
   next();
 });
 
-// ========== Static uploads (legacy/local) ==========
-const uploadsDir = path.join(__dirname, 'uploads');
+// Static (kept for compatibility; not used for gallery/ebooks now)
+const uploadsDir = path.join(process.cwd(), 'uploads');
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 app.use('/uploads', express.static(uploadsDir));
 
-// Gallery root (legacy/local)
-const galleryDir = path.join(uploadsDir, 'gallery');
-if (!fs.existsSync(galleryDir)) fs.mkdirSync(galleryDir, { recursive: true });
-
-/* ===================== Users (Neon Postgres — persistent) ===================== */
+/* ===================== Postgres ===================== */
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL, // e.g., postgresql://user:pass@host/db?sslmode=require
+  connectionString: process.env.DATABASE_URL,
   ssl: { require: true, rejectUnauthorized: false },
 });
+function pgNum(x) { const n = Number(x); return Number.isFinite(n) ? n : 0; }
 
-// Quick sanity log (optional)
-// try { const u = new URL(process.env.DATABASE_URL); console.log('DB host:', u.hostname); } catch(_) { console.warn('DATABASE_URL invalid'); }
-
-async function ensureUsersTable() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS users (
-      id SERIAL PRIMARY KEY,
-      username TEXT UNIQUE NOT NULL,
-      password_hash TEXT NOT NULL,
-      role TEXT NOT NULL DEFAULT 'user',
-      banned BOOLEAN NOT NULL DEFAULT FALSE,
-      name TEXT,
-      full_name TEXT,
-      display_name TEXT,
-      logged_in TEXT,
-      created_at TIMESTAMPTZ DEFAULT now()
-    );
-  `);
-  console.log('DB ready: users table ensured');
-}
-
-function rowToUser(r) {
-  return {
-    id: r.id,
-    username: r.username,
-    passwordHash: r.password_hash,
-    role: r.role,
-    banned: r.banned,
-    name: r.name || null,
-    fullName: r.full_name || null,
-    displayName: r.display_name || null,
-    loggedIn: r.logged_in || null,
-    createdAt: r.created_at,
-  };
-}
-
-async function getUsers() {
-  await ensureUsersTable();
-  const { rows } = await pool.query(`
-    SELECT id, username, password_hash, role, banned, name, full_name, display_name, logged_in, created_at
-    FROM users ORDER BY id ASC
-  `);
-  return rows.map(rowToUser);
-}
-
-async function saveUsers(users) {
-  await ensureUsersTable();
-  if (!Array.isArray(users)) return;
-  for (const u of users) {
-    let passwordHash = u.passwordHash || null;
-    if (u.password && String(u.password).trim()) {
-      passwordHash = bcrypt.hashSync(u.password, 10);
-      delete u.password;
-    }
-    await pool.query(
-      `INSERT INTO users (username, password_hash, role, banned, name, full_name, display_name, logged_in)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-       ON CONFLICT (username) DO UPDATE SET
-         password_hash = COALESCE(EXCLUDED.password_hash, users.password_hash),
-         role = EXCLUDED.role,
-         banned = EXCLUDED.banned,
-         name = EXCLUDED.name,
-         full_name = EXCLUDED.full_name,
-         display_name = EXCLUDED.display_name,
-         logged_in = EXCLUDED.logged_in`,
-      [
-        u.username,
-        passwordHash,
-        String(u.role || 'user'),
-        !!u.banned,
-        u.name || null,
-        u.fullName || null,
-        u.displayName || null,
-        u.loggedIn || null,
-      ]
-    );
-  }
-}
-
-/* ===================== Donation Screenshot upload: Cloudinary ===================== */
+/* ===================== Cloudinary ===================== */
 cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME, // correct keys required on Render
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key:    process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-const donationScreenshotStorage = new CloudinaryStorage({
-  cloudinary,
-  params: { folder: 'setapur/screenshots', allowed_formats: ['jpg','jpeg','png','webp','gif'], resource_type: 'image' },
-});
-const upload = multer({ storage: donationScreenshotStorage, limits: { fileSize: 20 * 1024 * 1024 } });
-
-/* ========== Multer for (legacy) gallery uploads (local FS; not persistent on Render) ========== */
-const IMG_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp']);
-const GALLERY_ALLOWED_EXTS = IMG_EXT;
-
-const galleryStoragePerFolder = multer.diskStorage({
-  destination: (req, file, cb) => {
-    try {
-      const slug = String(req.params.slug || '').trim();
-      if (!slug) return cb(new Error('slug required'));
-      const targetDir = path.join(galleryDir, slug);
-      const safeRoot = path.resolve(galleryDir);
-      const targetAbs = path.resolve(targetDir);
-      if (!targetAbs.startsWith(safeRoot)) return cb(new Error('Invalid slug'));
-      if (!fs.existsSync(targetAbs)) fs.mkdirSync(targetAbs, { recursive: true });
-      cb(null, targetAbs);
-    } catch (e) { cb(e); }
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname || '').toLowerCase();
-    const unique = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    cb(null, unique + ext);
-  },
-});
-const uploadGallery = multer({
-  storage: galleryStoragePerFolder,
-  fileFilter: (req, file, cb) => {
-    const ext = path.extname(file.originalname || '').toLowerCase();
-    if (GALLERY_ALLOWED_EXTS.has(ext)) return cb(null, true);
-    cb(new Error('Only image files are allowed'));
-  },
-  limits: { fileSize: 20 * 1024 * 1024, files: 25 },
-});
-
-const galleryStorageRoot = multer.diskStorage({
-  destination: (req, file, cb) => {
-    try {
-      if (!fs.existsSync(galleryDir)) fs.mkdirSync(galleryDir, { recursive: true });
-      cb(null, galleryDir);
-    } catch (e) { cb(e); }
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname || '').toLowerCase();
-    const unique = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    cb(null, unique + ext);
-  },
-});
-const uploadRootGallery = multer({
-  storage: galleryStorageRoot,
-  fileFilter: (req, file, cb) => {
-    const ext = path.extname(file.originalname || '').toLowerCase();
-    if (GALLERY_ALLOWED_EXTS.has(ext)) return cb(null, true);
-    cb(new Error('Only image files are allowed'));
-  },
-  limits: { fileSize: 20 * 1024 * 1024, files: 25 },
-});
-// =====================================================
-
+/* ===================== Auth helpers ===================== */
 const SECRET_KEY = process.env.JWT_SECRET || 'your_secret_key_here';
 
-/* ===================== Startup admin auto-seed (Postgres) ===================== */
-async function seedAdmin() {
-  try {
-    const users = await getUsers();
-    const username = process.env.INIT_ADMIN_USERNAME || 'admin';
-    const password = process.env.INIT_ADMIN_PASSWORD || 'Admin@123';
-    const role = 'mainadmin';
-
-    const resetFlag = String(process.env.INIT_ADMIN_RESET || '').toLowerCase();
-    const shouldReset = resetFlag === '1' || resetFlag === 'true';
-
-    const idx = Array.isArray(users) ? users.findIndex(u => String(u.username) === String(username)) : -1;
-
-    if (idx === -1) {
-      const next = Array.isArray(users) ? users.slice() : [];
-      next.push({ username, password, role, banned: false });
-      await saveUsers(next);
-      console.log(`Seeded admin user '${username}'`);
-    } else if (shouldReset) {
-      const next = users.slice();
-      next[idx].password = password;
-      next[idx].role = role;
-      next[idx].banned = false;
-      await saveUsers(next);
-      console.log(`Reset admin user '${username}'`);
-    } else {
-      console.log(`Admin user '${username}' already exists; skipping seed`);
-    }
-  } catch (e) {
-    console.warn('Admin seed skipped:', e.message);
-  }
-}
-
-/* ===================== Auth middleware (Option 2) ===================== */
 function normRole(r) {
   return String(r || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
 }
@@ -282,11 +105,19 @@ function authRole(roles) {
   };
 }
 
-/* ===================== Helpers ===================== */
-const SENSITIVE_KEYS = [
-  'screenshotUrl', 'screenshotPath', 'paymentScreenshot', 'screenshot',
-  'cashReceiverName', 'receiverName', 'receivedBy',
-];
+/* ===================== Common helpers ===================== */
+function slugify(s) {
+  return String(s || '')
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9\s-]/g, '')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-');
+}
+function pushNotification(username, notif) {
+  // TODO: wire if needed
+}
+const SENSITIVE_KEYS = ['screenshotUrl', 'screenshotPath', 'paymentScreenshot', 'screenshot', 'cashReceiverName', 'receiverName', 'receivedBy'];
 function isApproved(d) {
   return d && (d.approved === true || d.approved === 'true' || d.approved === 1 || d.approved === '1');
 }
@@ -297,468 +128,6 @@ function redactDonationForRole(d, role) {
   }
   return out;
 }
-function slugify(s) {
-  return String(s || '')
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9\s-]/g, '')
-    .replace(/\s+/g, '-')
-    .replace(/-+/g, '-');
-}
-function readJSONSafe(p, def = {}) {
-  try { if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, 'utf-8')); }
-  catch (_) {}
-  return def;
-}
-function writeJSONSafe(p, obj) {
-  try { fs.writeFileSync(p, JSON.stringify(obj, null, 2)); } catch (_) {}
-}
-function pushNotification(username, notif) {
-  // optional: wire to in-memory if needed
-}
-
-/* ===================== Gallery helpers (legacy/local) ===================== */
-const galleryRootMetaPath = path.join(galleryDir, '_meta.json');
-
-function loadRootMeta() {
-  const def = { folderOrder: [], rootImageOrder: [], disabledRootImages: {} };
-  const meta = readJSONSafe(galleryRootMetaPath, def);
-  meta.folderOrder = Array.isArray(meta.folderOrder) ? meta.folderOrder : [];
-  meta.rootImageOrder = Array.isArray(meta.rootImageOrder) ? meta.rootImageOrder : [];
-  meta.disabledRootImages = meta.disabledRootImages && typeof meta.disabledRootImages === 'object' ? meta.disabledRootImages : {};
-  return meta;
-}
-function saveRootMeta(meta) { writeJSONSafe(galleryRootMetaPath, meta || {}); }
-
-function folderMetaPath(slug) { return path.join(galleryDir, slug, 'meta.json'); }
-function getFolderMeta(slug) {
-  const p = folderMetaPath(slug);
-  const meta = readJSONSafe(p, {});
-  if (!('enabled' in meta)) meta.enabled = true;
-  if (!Array.isArray(meta.imageOrder)) meta.imageOrder = [];
-  if (!meta.disabledImages || typeof meta.disabledImages !== 'object') meta.disabledImages = {};
-  return { meta, p };
-}
-function saveFolderMeta(slug, meta) { writeJSONSafe(folderMetaPath(slug), meta); }
-
-function sortByOrder(items, idGetter, orderArr) {
-  const idx = new Map();
-  (orderArr || []).forEach((id, i) => idx.set(String(id), i));
-  return items.slice().sort((a, b) => {
-    const ia = idx.has(String(idGetter(a))) ? idx.get(String(idGetter(a))) : Number.MAX_SAFE_INTEGER;
-    const ib = idx.has(String(idGetter(b))) ? idx.get(String(idGetter(b))) : Number.MAX_SAFE_INTEGER;
-    if (ia !== ib) return ia - ib;
-    const na = String(a.name || '').toLowerCase();
-    const nb = String(b.name || '').toLowerCase();
-    return na.localeCompare(nb);
-  });
-}
-function moveInArray(arr, id, direction, newIndex) {
-  const a = arr.slice();
-  const cur = a.indexOf(id);
-  if (cur === -1) a.push(id);
-  const old = a.indexOf(id);
-  if (typeof newIndex === 'number') {
-    a.splice(old, 1);
-    a.splice(Math.max(0, Math.min(newIndex, a.length)), 0, id);
-    return a;
-  }
-  if (direction === 'up' && old > 0) {
-    [a[old - 1], a[old]] = [a[old], a[old - 1]];
-  } else if (direction === 'down' && old >= 0 && old < a.length - 1) {
-    [a[old + 1], a[old]] = [a[old], a[old + 1]];
-  }
-  return a;
-}
-function listFolderSlugs() {
-  try {
-    const entries = fs.readdirSync(galleryDir, { withFileTypes: true });
-    return entries.filter(e => e.isDirectory()).map(e => e.name).sort((a,b)=>a.localeCompare(b));
-  } catch (_) { return []; }
-}
-function ensureFolderOrderComplete() {
-  const meta = loadRootMeta();
-  const slugs = listFolderSlugs();
-  const set = new Set(meta.folderOrder || []);
-  let changed = false;
-  for (const s of slugs) {
-    if (!set.has(s)) {
-      meta.folderOrder.push(s);
-      set.add(s);
-      changed = true;
-    }
-  }
-  const live = new Set(slugs);
-  const filtered = meta.folderOrder.filter(s => live.has(s));
-  if (filtered.length !== meta.folderOrder.length) {
-    meta.folderOrder = filtered;
-    changed = true;
-  }
-  if (changed) saveRootMeta(meta);
-  return meta;
-}
-function ensureRootOrderComplete() {
-  const meta = loadRootMeta();
-  let files = [];
-  try {
-    files = fs.readdirSync(galleryDir, { withFileTypes: true })
-      .filter(ent => ent.isFile())
-      .map(ent => ent.name)
-      .filter(name => IMG_EXT.has(path.extname(name).toLowerCase()));
-  } catch (_) { files = []; }
-  const set = new Set(meta.rootImageOrder || []);
-  let changed = false;
-  for (const fn of files) {
-    if (!set.has(fn)) {
-      meta.rootImageOrder.push(fn);
-      set.add(fn);
-      changed = true;
-    }
-  }
-  const live = new Set(files);
-  const filtered = meta.rootImageOrder.filter(n => live.has(n));
-  if (filtered.length !== meta.rootImageOrder.length) {
-    meta.rootImageOrder = filtered;
-    changed = true;
-  }
-  if (changed) saveRootMeta(meta);
-  return meta;
-}
-
-/* ===================== Folders bootstrap ===================== */
-function normalizeFoldersEvents(foldersIn) {
-  return (foldersIn || []).map((f) => {
-    const out = { ...f };
-    const evs = Array.isArray(out.events) ? out.events : [];
-    out.events = evs.map((ev) => {
-      if (typeof ev === 'string') {
-        return {
-          id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.round(Math.random() * 1e9)}`,
-          name: ev,
-          enabled: true,
-          showDonationDetail: true,
-          showExpenseDetail: true,
-        };
-      }
-      return {
-        id: (ev && ev.id) || (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.round(Math.random() * 1e9)}`),
-        name: (ev && (ev.name || ev.eventName || ev.title || ev.label)) || '',
-        enabled: ev && ev.enabled !== false,
-        showDonationDetail: ev && ev.showDonationDetail !== false,
-        showExpenseDetail: ev && ev.showExpenseDetail !== false,
-      };
-    });
-    return out;
-  });
-}
-let folders = readFolders();
-if (!Array.isArray(folders) || folders.length === 0) {
-  folders = [
-    {
-      id: 'default-1',
-      name: 'shri krishna janmastami',
-      events: [
-        { id: 'evt-1', name: 'shri krishna janmastami 2025', enabled: true, showDonationDetail: true, showExpenseDetail: true },
-        { id: 'evt-2', name: 'shri krishna chhathi 2025', enabled: true, showDonationDetail: true, showExpenseDetail: true },
-      ],
-    },
-  ];
-}
-folders = normalizeFoldersEvents(folders);
-writeFolders(folders);
-app.locals.folders = folders;
-
-/* ===================== Expenses API v2 (file store) ===================== */
-let expenses = [];
-const dataDir = path.join(__dirname, 'data');
-const expensesFile = path.join(dataDir, 'expenses.json');
-
-function ensureExpenseShape(e) {
-  const nowIso = new Date().toISOString();
-  return {
-    id: Number(e.id) || 0,
-    amount: Number(e.amount) || 0,
-    category: (e.category || '').toString().trim(),
-    description: (e.description || '').toString().trim(),
-    paidTo: (e.paidTo || '').toString().trim(),
-    date: e.date ? new Date(e.date).toISOString() : (e.date === null ? null : undefined),
-    createdAt: e.createdAt ? new Date(e.createdAt).toISOString() : nowIso,
-    updatedAt: e.updatedAt ? new Date(e.updatedAt).toISOString() : nowIso,
-    enabled: e.enabled === false ? false : true,
-    approved: e.approved === true,
-    status: e.status === 'pending' || e.approved !== true ? 'pending' : 'approved',
-    submittedBy: e.submittedBy || null,
-    submittedById: e.submittedById || null,
-    approvedBy: e.approvedBy || null,
-    approvedById: e.approvedById || null,
-    approvedAt: e.approvedAt ? new Date(e.approvedAt).toISOString() : null,
-  };
-}
-function loadExpenses() {
-  try {
-    if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
-    if (fs.existsSync(expensesFile)) {
-      const raw = fs.readFileSync(expensesFile, 'utf-8');
-      const parsed = JSON.parse(raw);
-      expenses = Array.isArray(parsed) ? parsed.map(ensureExpenseShape) : [];
-    } else {
-      expenses = [];
-    }
-  } catch (e) {
-    console.warn('Failed to load expenses, starting empty:', e.message);
-    expenses = [];
-  }
-  app.locals.expenses = expenses;
-}
-function saveExpenses() {
-  try {
-    if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
-    fs.writeFileSync(expensesFile, JSON.stringify(expenses, null, 2));
-  } catch (e) {
-    console.error('Failed to save expenses:', e.message);
-  }
-}
-function nextExpenseId() {
-  const maxId = (Array.isArray(expenses) ? expenses : []).reduce((m, x) => Math.max(m, Number(x.id) || 0), 0);
-  return maxId + 1;
-}
-loadExpenses();
-app.locals.expenses = expenses;
-
-// List (users: approved+enabled; admin: can see all/pending/disabled)
-app.get('/api/expenses/list', authRole(['user','admin','mainadmin']), (req, res) => {
-  try {
-    const role = req.user?.role || 'user';
-    const isAdmin = role === 'admin' || role === 'mainadmin';
-    const q = (req.query.category || req.query.eventName || req.query.eventId || '').toString().trim().toLowerCase();
-    const statusQ = (req.query.status || (isAdmin ? 'all' : 'approved')).toString().toLowerCase();
-    const includeDisabledQ = (req.query.includeDisabled || '').toString().toLowerCase();
-    const includeDisabled = includeDisabledQ === '1' || includeDisabledQ === 'true';
-    const includePendingMineQ = (req.query.includePendingMine || req.query.mine || '').toString().toLowerCase();
-    const includePendingMine = includePendingMineQ === '1' || includePendingMineQ === 'true';
-
-    let list = (Array.isArray(expenses) ? expenses : []).slice();
-
-    if (q) list = list.filter(e => (e.category || '').toString().trim().toLowerCase() === q);
-
-    if (isAdmin) {
-      if (statusQ === 'approved') list = list.filter(e => e.approved === true);
-      else if (statusQ === 'pending') list = list.filter(e => e.approved !== true);
-      if (!includeDisabled) list = list.filter(e => e.enabled !== false);
-    } else {
-      let approvedEnabled = list.filter(e => e.approved === true && e.enabled !== false);
-      if (includePendingMine && req.user && req.user.username) {
-        const mine = list.filter(e => e.submittedBy === req.user.username && e.approved !== true);
-        const ids = new Set(approvedEnabled.map(x => x.id));
-        for (const x of mine) if (!ids.has(x.id)) approvedEnabled.push(x);
-      }
-      list = approvedEnabled;
-    }
-
-    list.sort((a, b) => {
-      const da = a.date ? new Date(a.date).getTime() : (a.createdAt ? new Date(a.createdAt).getTime() : 0);
-      const db = b.date ? new Date(b.date).getTime() : (b.createdAt ? new Date(b.createdAt).getTime() : 0);
-      return db - da;
-    });
-
-    res.json(list);
-  } catch (e) {
-    console.error('list expenses error:', e);
-    res.status(500).send('Failed to list expenses');
-  }
-});
-
-// User submit (pending)
-app.post('/api/expenses/submit', authRole(['user','admin','mainadmin']), (req, res) => {
-  try {
-    const { amount, category, eventName, description, paidTo, date } = req.body || {};
-    const cat = (category || eventName || '').toString().trim();
-    if (!cat) return res.status(400).json({ error: 'category (event) is required' });
-    if (amount === undefined) return res.status(400).json({ error: 'amount is required' });
-    const amt = Number(amount);
-    if (!Number.isFinite(amt)) return res.status(400).json({ error: 'amount must be a number' });
-
-    const now = new Date();
-    const e = ensureExpenseShape({
-      id: nextExpenseId(),
-      amount: amt,
-      category: cat,
-      description: (description || '').toString().trim(),
-      paidTo: (paidTo || '').toString().trim(),
-      date: date ? new Date(date).toISOString() : now.toISOString(),
-      createdAt: now.toISOString(),
-      updatedAt: now.toISOString(),
-      enabled: true,
-      approved: false,
-      status: 'pending',
-      submittedBy: req.user?.username || null,
-      submittedById: req.user?.id || null,
-    });
-
-    expenses.push(e);
-    saveExpenses();
-    app.locals.expenses = expenses;
-
-    if (e.submittedBy) {
-      pushNotification(e.submittedBy, {
-        type: 'expenseSubmit',
-        title: 'Expense submitted',
-        body: `${e.category} • ₹${e.amount} (pending approval)`,
-        data: { id: e.id, category: e.category, amount: e.amount, approved: false },
-      });
-    }
-
-    res.status(201).json({ message: 'Expense submitted (pending)', expense: e });
-  } catch (err) {
-    console.error('submit expense error:', err);
-    res.status(500).send('Submit expense failed');
-  }
-});
-
-// Admin create
-app.post('/api/expenses', authRole(['admin','mainadmin']), (req, res) => {
-  try {
-    const { amount, category, description, paidTo, date, approveNow } = req.body || {};
-    if (amount === undefined) return res.status(400).json({ error: 'amount is required' });
-    const amt = Number(amount);
-    if (!Number.isFinite(amt)) return res.status(400).json({ error: 'amount must be a number' });
-    const cat = (category || '').toString().trim();
-    if (!cat) return res.status(400).json({ error: 'category is required' });
-
-    const approve = approveNow !== false && approveNow !== 'false';
-    const now = new Date();
-    const e = ensureExpenseShape({
-      id: nextExpenseId(),
-      amount: amt,
-      category: cat,
-      description: (description || '').toString().trim(),
-      paidTo: (paidTo || '').toString().trim(),
-      date: date ? new Date(date).toISOString() : now.toISOString(),
-      createdAt: now.toISOString(),
-      updatedAt: now.toISOString(),
-      enabled: true,
-      approved: approve,
-      status: approve ? 'approved' : 'pending',
-      submittedBy: req.user?.username || null,
-      submittedById: req.user?.id || null,
-      approvedBy: approve ? req.user.username : null,
-      approvedById: approve ? req.user.id : null,
-      approvedAt: approve ? now.toISOString() : null,
-    });
-
-    expenses.push(e);
-    saveExpenses();
-    app.locals.expenses = expenses;
-
-    res.status(201).json({ message: 'Expense created', expense: e });
-  } catch (err) {
-    console.error('create expense error:', err);
-    res.status(500).send('Create expense failed');
-  }
-});
-
-// Admin update
-app.put('/api/expenses/:id', authRole(['admin','mainadmin']), (req, res) => {
-  try {
-    const { id } = req.params;
-    const idx = expenses.findIndex(x => String(x.id) === String(id));
-    if (idx === -1) return res.status(404).json({ error: 'Expense not found' });
-
-    const body = req.body || {};
-    if (body.amount !== undefined) {
-      const amt = Number(body.amount);
-      if (!Number.isFinite(amt)) return res.status(400).json({ error: 'amount must be a number' });
-      expenses[idx].amount = amt;
-    }
-    if (typeof body.category === 'string') expenses[idx].category = body.category.trim();
-    if (typeof body.description === 'string') expenses[idx].description = body.description.trim();
-    if (typeof body.paidTo === 'string') expenses[idx].paidTo = body.paidTo.trim();
-    if (body.date) expenses[idx].date = new Date(body.date).toISOString();
-    if (body.enabled !== undefined) expenses[idx].enabled = body.enabled !== false && body.enabled !== 'false';
-
-    expenses[idx].updatedAt = new Date().toISOString();
-    saveExpenses();
-    app.locals.expenses = expenses;
-
-    res.json({ message: 'Expense updated', expense: expenses[idx] });
-  } catch (err) {
-    console.error('update expense error:', err);
-    res.status(500).send('Update expense failed');
-  }
-});
-
-// Admin enable/disable
-app.post('/api/expenses/:id/enable', authRole(['admin','mainadmin']), (req, res) => {
-  try {
-    const { id } = req.params;
-    const idx = expenses.findIndex(x => String(x.id) === String(id));
-    if (idx === -1) return res.status(404).json({ error: 'Expense not found' });
-    const enabledRaw = req.body.enabled;
-    const enabled = enabledRaw !== false && enabledRaw !== 'false' && enabledRaw !== 0 && enabledRaw !== '0';
-    expenses[idx].enabled = enabled;
-    expenses[idx].updatedAt = new Date().toISOString();
-    saveExpenses();
-    app.locals.expenses = expenses;
-    res.json({ ok: true, expense: expenses[idx] });
-  } catch (e) {
-    console.error('enable expense error:', e);
-    res.status(500).send('Failed to enable/disable expense');
-  }
-});
-
-// Admin approve/disapprove (path with id)
-app.post('/admin/expenses/:id/approve', authRole(['admin','mainadmin']), (req, res) => {
-  try {
-    const { id } = req.params;
-    const idx = expenses.findIndex(x => String(x.id) === String(id));
-    if (idx === -1) return res.status(404).json({ error: 'Expense not found' });
-
-    const approveRaw = req.body.approve;
-    const approve = approveRaw === true || approveRaw === 'true' || approveRaw === 1 || approveRaw === '1';
-
-    expenses[idx].approved = approve;
-    expenses[idx].status = approve ? 'approved' : 'pending';
-    expenses[idx].approvedBy = req.user.username;
-    expenses[idx].approvedById = req.user.id;
-    expenses[idx].approvedAt = new Date().toISOString();
-    expenses[idx].updatedAt = new Date().toISOString();
-
-    const who = expenses[idx].submittedBy || null;
-    if (who) {
-      pushNotification(who, {
-        type: `expense${approve ? 'Approval' : 'Pending'}`,
-        title: `Expense ${approve ? 'approved' : 'set to pending'}`,
-        body: `${expenses[idx].category} • ₹${expenses[idx].amount}`,
-        data: { id: expenses[idx].id, category: expenses[idx].category, approved: approve },
-      });
-    }
-
-    saveExpenses();
-    app.locals.expenses = expenses;
-    res.json({ message: `Expense ${approve ? 'approved' : 'set to pending'}`, expense: expenses[idx] });
-  } catch (e) {
-    console.error('approve expense error:', e);
-    res.status(500).send('Approval failed');
-  }
-});
-
-// Admin delete
-app.delete('/api/expenses/:id', authRole(['admin','mainadmin']), (req, res) => {
-  try {
-    const { id } = req.params;
-    const idx = expenses.findIndex(x => String(x.id) === String(id));
-    if (idx === -1) return res.status(404).json({ error: 'Expense not found' });
-    const removed = expenses.splice(idx, 1)[0];
-    saveExpenses();
-    app.locals.expenses = expenses;
-    res.json({ message: 'Expense deleted', expense: removed });
-  } catch (err) {
-    console.error('delete expense error:', err);
-    res.status(500).send('Delete expense failed');
-  }
-});
-
-/* ===================== Donations with search (screenshots: Cloudinary) ===================== */
 function normStr(x) { return String(x || '').toLowerCase().trim(); }
 function matchesDonation(d, q) {
   const s = normStr(q);
@@ -768,8 +137,6 @@ function matchesDonation(d, q) {
   const cat = normStr(d.category || '');
   return name.includes(s) || rc.includes(s) || cat.includes(s);
 }
-
-// ======= 6-char alphanumeric (must include letters + digits, unique) =======
 const ALPHA = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 const DIGITS = '0123456789';
 const ALNUM = ALPHA + DIGITS;
@@ -783,353 +150,113 @@ function generate6CharAlnumMix() {
   }
   return arr.join('');
 }
-function generateUniqueReceiptCode() {
-  const used = new Set((donations || []).map(d => String(d.receiptCode || d.code || '').toUpperCase()));
-  let code;
-  let tries = 0;
-  do {
-    code = generate6CharAlnumMix();
-    tries++;
-  } while (used.has(code) && tries < 1000);
-  return code;
+
+/* ===================== Users (Postgres) ===================== */
+async function ensureUsersTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      username TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'user',
+      banned BOOLEAN NOT NULL DEFAULT FALSE,
+      name TEXT,
+      full_name TEXT,
+      display_name TEXT,
+      logged_in TEXT,
+      created_at TIMESTAMPTZ DEFAULT now()
+    );
+  `);
+  console.log('DB ready: users table ensured');
 }
-
-// Submit donation (with screenshot)
-function createDonationHandler(req, res) {
-  try {
-    const { amount, paymentMethod, category, cashReceiverName, donorName } = req.body;
-    if (!donorName || !String(donorName).trim()) return res.status(400).json({ error: 'donorName is required' });
-    if (!amount || !paymentMethod || !category) return res.status(400).json({ error: 'amount, paymentMethod, and category are required' });
-
-    const code = generateUniqueReceiptCode();
-
-    // Cloudinary upload: multer handles; get URL + public_id
-    const screenshotUrl = req.file?.path || null;      // Cloudinary https URL
-    const screenshotPath = req.file?.filename || null; // Cloudinary public_id
-
-    const donorUsername = req.user.username;
-    const donorUserId = req.user.id;
-    const donorDisplayName = (donorName && String(donorName).trim()) || donorUsername;
-
-    const donation = {
-      id: donations.length + 1,
-      donorUserId,
-      donorUsername,
-      donorName: donorDisplayName,
-      amount: Number(amount),
-      paymentMethod,
-      category,
-      cashReceiverName: cashReceiverName || null,
-      approved: false,
-      status: 'pending',
-      createdAt: new Date(),
-      screenshotPath,
-      screenshotUrl,
-      code,
-      receiptCode: code,
-    };
-
-    donations.push(donation);
-    if (typeof saveDonations === 'function') saveDonations();
-    return res.status(201).json({ message: 'Donation submitted', donation });
-  } catch (err) {
-    console.error('submit-donation error:', err);
-    return res.status(500).send('Failed to submit donation');
-  }
+function rowToUser(r) {
+  return {
+    id: r.id,
+    username: r.username,
+    passwordHash: r.password_hash,
+    role: r.role,
+    banned: r.banned,
+    name: r.name || null,
+    fullName: r.full_name || null,
+    displayName: r.display_name || null,
+    loggedIn: r.logged_in || null,
+    createdAt: r.created_at,
+  };
 }
-app.post('/api/donations/submit-donation', authRole(['user', 'admin', 'mainadmin']), upload.single('screenshot'), createDonationHandler);
-// Alias: create
-app.post('/api/donations/create', authRole(['user', 'admin', 'mainadmin']), upload.single('screenshot'), createDonationHandler);
-
-// My account receipts (approved only)
-app.get('/myaccount/receipts', authRole(['user', 'admin', 'mainadmin']), (req, res) => {
-  const username = req.user.username;
-  const userDonations = donations.filter((d) =>
-    (d.donorUsername ? d.donorUsername === username : d.donorName === username) && isApproved(d)
-  );
-  res.json(userDonations);
-});
-
-// User/Admin list with q filter
-app.get('/api/donations/donations', authRole(['user', 'admin', 'mainadmin']), (req, res) => {
-  const status = String(req.query.status || 'approved').toLowerCase();
-  const role = req.user.role;
-  const q = (req.query.q || req.query.search || '').toString().trim();
-
-  if ((role === 'admin' || role === 'mainadmin') && status === 'all') {
-    let all = donations.slice();
-    if (q) all = all.filter(d => matchesDonation(d, q));
-    const outAll = all.map((d) => redactDonationForRole(d, role));
-    return res.json(outAll);
-  }
-
-  let list = donations.filter((d) =>
-    d.donorUsername ? d.donorUsername === req.user.username : d.donorName === req.user.username
-  );
-  if (status === 'pending') list = list.filter((d) => !isApproved(d));
-  else if (status === 'approved') list = list.filter(isApproved);
-
-  if (q) list = list.filter(d => matchesDonation(d, q));
-
-  const out = list.map((d) => redactDonationForRole(d, role));
-  return res.json(out);
-});
-
-// Admin all donations with q filter
-app.get('/api/donations/all-donations', authRole(['admin', 'mainadmin']), (req, res) => {
-  const role = req.user.role;
-  const host = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
-  const q = (req.query.q || req.query.search || '').toString().trim();
-
-  let normalized = donations.map((d) => ({
-    ...d,
-    screenshotUrl:
-      d.screenshotUrl || (d.screenshotPath ? `${host}/${String(d.screenshotPath).replace(/\\/g, '/')}` : null),
-  }));
-
-  if (q) normalized = normalized.filter(d => matchesDonation(d, q));
-
-  const out = normalized.map((d) => redactDonationForRole(d, role));
-  res.json(out);
-});
-
-// Universal donation search (role-safe)
-app.get('/api/donations/search', authRole(['user','admin','mainadmin']), (req, res) => {
-  try {
-    const role = req.user?.role || 'user';
-    const isAdmin = role === 'admin' || role === 'mainadmin';
-    const q = (req.query.q || req.query.search || '').toString().trim();
-    if (!q) return res.json([]);
-
-    let base = donations.slice();
-
-    if (!isAdmin) {
-      const approvedOnly = base.filter(isApproved);
-      const mineExtra = base.filter(d =>
-        (d.donorUsername ? d.donorUsername === req.user.username : d.donorName === req.user.username)
-      );
-      const ids = new Set(approvedOnly.map(d => d.id));
-      for (const d of mineExtra) if (!ids.has(d.id)) approvedOnly.push(d);
-      base = approvedOnly;
+async function getUsers() {
+  await ensureUsersTable();
+  const { rows } = await pool.query(`
+    SELECT id, username, password_hash, role, banned, name, full_name, display_name, logged_in, created_at
+    FROM users ORDER BY id ASC
+  `);
+  return rows.map(rowToUser);
+}
+async function saveUsers(users) {
+  await ensureUsersTable();
+  if (!Array.isArray(users)) return;
+  for (const u of users) {
+    let passwordHash = u.passwordHash || null;
+    if (u.password && String(u.password).trim()) {
+      passwordHash = bcrypt.hashSync(u.password, 10);
+      delete u.password;
     }
-
-    let list = base.filter(d => matchesDonation(d, q));
-
-    list.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
-    list = list.slice(0, 100);
-
-    const out = list.map(d => redactDonationForRole(d, role));
-    res.json(out);
-  } catch (e) {
-    console.error('donation search error:', e);
-    res.status(500).send('Search failed');
-  }
-});
-
-// Admin pending donations
-app.get('/admin/donations/pending', authRole(['admin', 'mainadmin']), (req, res) => {
-  const host = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
-  const pending = (donations || [])
-    .filter((d) => !isApproved(d))
-    .map((d) => ({
-      ...d,
-      screenshotUrl:
-        d.screenshotUrl || (d.screenshotPath ? `${host}/${String(d.screenshotPath).replace(/\\/g, '/')}` : null),
-    }));
-  res.json(pending);
-});
-
-// Admin approve a donation (enforces 6-char alphanumeric code)
-app.post('/admin/donations/:id/approve', authRole(['admin', 'mainadmin']), async (req, res) => {
-  try {
-    const { id } = req.params;
-    const idx = donations.findIndex((x) => String(x.id) === String(id));
-    if (idx === -1) return res.status(404).json({ error: 'Donation not found' });
-
-    const d = donations[idx];
-    const alreadyApproved = isApproved(d);
-
-    let approvedByName = req.user.username;
-    try {
-      const users = await getUsers();
-      const approver = users.find((u) => u.username === req.user.username);
-      approvedByName = approver?.name || approver?.fullName || approver?.displayName || req.user.username;
-    } catch (_) {}
-
-    d.approved = true;
-    d.status = 'approved';
-    d.approvedBy = req.user.username;
-    d.approvedById = req.user.id;
-    d.approvedByRole = req.user.role;
-    d.approvedByName = approvedByName;
-    d.approvedAt = new Date();
-
-    // Ensure 6-char A-Z0-9 with at least 1 letter + 1 digit
-    const rc = String(d.receiptCode || '').toUpperCase();
-    const valid = rc.length === 6 && /^[A-Z0-9]{6}$/.test(rc) && /[A-Z]/.test(rc) && /\d/.test(rc);
-    if (!valid) d.receiptCode = generateUniqueReceiptCode();
-
-    const donorUser = d.donorUsername || d.donorName || null;
-    const rcOut = d.receiptCode || d.code || '';
-    if (donorUser && !alreadyApproved) {
-      pushNotification(donorUser, {
-        type: 'donationApproval',
-        title: 'Donation approved',
-        body: `Receipt: ${rcOut || 'N/A'} • Event: ${d.category} • Amount: ₹${Number(d.amount || 0)}`,
-        data: { receiptCode: rcOut || null, category: d.category, amount: d.amount, paymentMethod: d.paymentMethod, approved: true },
-      });
-    }
-
-    if (typeof saveDonations === 'function') saveDonations();
-    return res.json({ message: 'Donation approved', donation: d });
-  } catch (err) {
-    console.error('admin approve error:', err);
-    return res.status(500).send('Approval failed');
-  }
-});
-
-// Admin disapprove (set pending)
-app.post('/admin/donations/:id/disapprove', authRole(['admin', 'mainadmin']), (req, res) => {
-  try {
-    const { id } = req.params;
-    const idx = donations.findIndex((x) => String(x.id) === String(id));
-    if (idx === -1) return res.status(404).json({ error: 'Donation not found' });
-
-    const d = donations[idx];
-
-    d.approved = false;
-    d.status = 'pending';
-    d.approvedBy = null;
-    d.approvedById = null;
-    d.approvedByRole = null;
-    d.approvedByName = null;
-    d.approvedAt = null;
-    d.updatedAt = new Date();
-
-    if (typeof saveDonations === 'function') saveDonations();
-    return res.json({ message: 'Donation set to pending', donation: d });
-  } catch (err) {
-    console.error('admin disapprove error:', err);
-    return res.status(500).send('Disapprove failed');
-  }
-});
-
-// Admin edit donation
-function handleDonationUpdate(req, res) {
-  try {
-    const { id } = req.params;
-    const idx = donations.findIndex(x => String(x.id) === String(id));
-    if (idx === -1) return res.status(404).json({ error: 'Donation not found' });
-
-    const body = req.body || {};
-    const d = donations[idx];
-
-    if (body.amount !== undefined) {
-      const amt = Number(body.amount);
-      if (!Number.isFinite(amt)) return res.status(400).json({ error: 'amount must be a number' });
-      d.amount = amt;
-    }
-    if (typeof body.donorName === 'string') d.donorName = body.donorName.trim();
-    if (typeof body.category === 'string') d.category = body.category.trim();
-    if (typeof body.paymentMethod === 'string') d.paymentMethod = body.paymentMethod.trim();
-    if (typeof body.cashReceiverName === 'string') d.cashReceiverName = body.cashReceiverName.trim();
-
-    // Optional: update receiptCode with validation + uniqueness
-    if (typeof body.receiptCode === 'string' && body.receiptCode.trim()) {
-      const rc = body.receiptCode.trim().toUpperCase();
-      const valid = rc.length === 6 && /^[A-Z0-9]{6}$/.test(rc) && /[A-Z]/.test(rc) && /\d/.test(rc);
-      const dup = donations.some((x, i) => i !== idx && String(x.receiptCode || x.code || '').toUpperCase() === rc);
-      if (!valid) return res.status(400).json({ error: 'receiptCode must be 6-char A-Z0-9 with at least 1 letter & 1 digit' });
-      if (dup) return res.status(409).json({ error: 'receiptCode already exists' });
-      d.receiptCode = rc;
-    }
-    if (body.regenerateReceiptCode === true || body.regenerateReceiptCode === 'true') {
-      d.receiptCode = generateUniqueReceiptCode();
-    }
-
-    d.updatedAt = new Date();
-
-    if (typeof saveDonations === 'function') saveDonations();
-    return res.json({ message: 'Donation updated', donation: d });
-  } catch (e) {
-    console.error('update donation error:', e);
-    res.status(500).send('Update donation failed');
+    await pool.query(
+      `INSERT INTO users (username, password_hash, role, banned, name, full_name, display_name, logged_in)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       ON CONFLICT (username) DO UPDATE SET
+         password_hash = COALESCE(EXCLUDED.password_hash, users.password_hash),
+         role = EXCLUDED.role,
+         banned = EXCLUDED.banned,
+         name = EXCLUDED.name,
+         full_name = EXCLUDED.full_name,
+         display_name = EXCLUDED.display_name,
+         logged_in = EXCLUDED.logged_in`,
+      [
+        u.username,
+        passwordHash,
+        String(u.role || 'user'),
+        !!u.banned,
+        u.name || null,
+        u.fullName || null,
+        u.displayName || null,
+        u.loggedIn || null,
+      ]
+    );
   }
 }
-app.put('/admin/donations/:id', authRole(['admin', 'mainadmin']), handleDonationUpdate);
-app.put('/api/donations/:id', authRole(['admin', 'mainadmin']), handleDonationUpdate);
-
-// Alias: approve/disapprove via single endpoint (kept for your FE call)
-app.post('/api/donations/approve', authRole(['admin','mainadmin']), async (req, res) => {
+async function seedAdmin() {
   try {
-    const { id, approve } = req.body || {};
-    if (!id) return res.status(400).json({ error: 'id required' });
+    const users = await getUsers();
+    const username = process.env.INIT_ADMIN_USERNAME || 'admin';
+    const password = process.env.INIT_ADMIN_PASSWORD || 'Admin@123';
+    const role = 'mainadmin';
 
-    const idx = (donations || []).findIndex(x => String(x.id) === String(id));
-    if (idx === -1) return res.status(404).json({ error: 'Donation not found' });
-    const d = donations[idx];
+    const resetFlag = String(process.env.INIT_ADMIN_RESET || '').toLowerCase();
+    const shouldReset = resetFlag === '1' || resetFlag === 'true';
 
-    const wantApprove = (approve === true || approve === 'true' || approve === 1 || approve === '1');
+    const idx = Array.isArray(users) ? users.findIndex(u => String(u.username) === String(username)) : -1;
 
-    if (wantApprove) {
-      const alreadyApproved = isApproved(d);
-
-      let approvedByName = req.user.username;
-      try {
-        const users = await getUsers();
-        const approver = users.find(u => u.username === req.user.username);
-        approvedByName = approver?.name || approver?.fullName || approver?.displayName || req.user.username;
-      } catch (_) {}
-
-      d.approved = true;
-      d.status = 'approved';
-      d.approvedBy = req.user.username;
-      d.approvedById = req.user.id;
-      d.approvedByRole = req.user.role;
-      d.approvedByName = approvedByName;
-      d.approvedAt = new Date();
-
-      // ensure valid 6-char code
-      const rc = String(d.receiptCode || '').toUpperCase();
-      const valid = rc.length === 6 && /^[A-Z0-9]{6}$/.test(rc) && /[A-Z]/.test(rc) && /\d/.test(rc);
-      if (!valid) d.receiptCode = generateUniqueReceiptCode();
-
-      if (!alreadyApproved) {
-        const donorUser = d.donorUsername || d.donorName || null;
-        const rcOut = d.receiptCode || d.code || '';
-        if (donorUser) {
-          pushNotification(donorUser, {
-            type: 'donationApproval',
-            title: 'Donation approved',
-            body: `Receipt: ${rcOut || 'N/A'} • Event: ${d.category} • Amount: ₹${Number(d.amount || 0)}`,
-            data: { receiptCode: rcOut || null, category: d.category, amount: d.amount, paymentMethod: d.paymentMethod, approved: true },
-          });
-        }
-      }
-
-      if (typeof saveDonations === 'function') saveDonations();
-      return res.json({ message: 'Donation approved', donation: d });
+    if (idx === -1) {
+      const next = Array.isArray(users) ? users.slice() : [];
+      next.push({ username, password, role, banned: false });
+      await saveUsers(next);
+      console.log(`Seeded admin user '${username}'`);
+    } else if (shouldReset) {
+      const next = users.slice();
+      next[idx].password = password;
+      next[idx].role = role;
+      next[idx].banned = false;
+      await saveUsers(next);
+      console.log(`Reset admin user '${username}'`);
     } else {
-      // Disapprove (set to pending)
-      d.approved = false;
-      d.status = 'pending';
-      d.approvedBy = null;
-      d.approvedById = null;
-      d.approvedByRole = null;
-      d.approvedByName = null;
-      d.approvedAt = null;
-      d.updatedAt = new Date();
-
-      if (typeof saveDonations === 'function') saveDonations();
-      return res.json({ message: 'Donation set to pending', donation: d });
+      console.log(`Admin user '${username}' already exists; skipping seed`);
     }
   } catch (e) {
-    console.error('alias /api/donations/approve error:', e);
-    res.status(500).send('Operation failed');
+    console.warn('Admin seed skipped:', e.message);
   }
-});
+}
 
-/* ===================== Auth: Login (role normalized) ===================== */
+/* ===================== Auth: Login ===================== */
 app.post('/auth/login', async (req, res) => {
   const { username, password, deviceId } = req.body || {};
   const users = await getUsers();
@@ -1146,7 +273,7 @@ app.post('/auth/login', async (req, res) => {
   res.json({ token });
 });
 
-/* ===================== Admin: Create/List Users (for admin app) ===================== */
+/* ===================== Admin: Create/List Users ===================== */
 const ALLOWED_ROLES = new Set(['user', 'admin', 'mainadmin']);
 
 app.post('/admin/users', authRole(['admin','mainadmin']), async (req, res) => {
@@ -1179,139 +306,871 @@ app.get('/admin/users', authRole(['admin','mainadmin']), async (req, res) => {
   res.json(users.map(u => ({ id: u.id, username: u.username, role: u.role, banned: !!u.banned })));
 });
 
-/* ===================== Analytics summary (event-wise) ===================== */
-app.get('/analytics/summary', authRole(['user','admin','mainadmin']), (req, res) => {
+/* ===================== DB Schema Ensures (Expenses/Donations/Gallery/Ebooks/Categories) ===================== */
+async function ensureExpensesTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS expenses (
+      id SERIAL PRIMARY KEY,
+      amount NUMERIC NOT NULL,
+      category TEXT NOT NULL,
+      description TEXT,
+      paid_to TEXT,
+      date TIMESTAMPTZ,
+      created_at TIMESTAMPTZ DEFAULT now(),
+      updated_at TIMESTAMPTZ DEFAULT now(),
+      enabled BOOLEAN DEFAULT TRUE,
+      approved BOOLEAN DEFAULT FALSE,
+      status TEXT DEFAULT 'pending',
+      submitted_by TEXT,
+      submitted_by_id INT,
+      approved_by TEXT,
+      approved_by_id INT,
+      approved_at TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_expenses_cat ON expenses (lower(category));
+    CREATE INDEX IF NOT EXISTS idx_expenses_approved_enabled ON expenses (approved, enabled);
+  `);
+  console.log('DB ready: expenses');
+}
+async function ensureDonationsTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS donations (
+      id SERIAL PRIMARY KEY,
+      donor_user_id INT,
+      donor_username TEXT,
+      donor_name TEXT,
+      amount NUMERIC NOT NULL,
+      payment_method TEXT NOT NULL,
+      category TEXT NOT NULL,
+      cash_receiver_name TEXT,
+      approved BOOLEAN DEFAULT FALSE,
+      status TEXT DEFAULT 'pending',
+      screenshot_public_id TEXT,
+      screenshot_url TEXT,
+      receipt_code TEXT UNIQUE,
+      created_at TIMESTAMPTZ DEFAULT now(),
+      updated_at TIMESTAMPTZ DEFAULT now(),
+      approved_by TEXT,
+      approved_by_id INT,
+      approved_by_role TEXT,
+      approved_by_name TEXT,
+      approved_at TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_donations_cat ON donations (lower(category));
+    CREATE INDEX IF NOT EXISTS idx_donations_approved ON donations (approved);
+    CREATE INDEX IF NOT EXISTS idx_donations_created ON donations (created_at);
+  `);
+  console.log('DB ready: donations');
+}
+async function ensureGalleryTables() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS gallery_folders (
+      slug TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      enabled BOOLEAN DEFAULT TRUE,
+      order_index INT DEFAULT 0,
+      cover_public_id TEXT,
+      cover_url TEXT,
+      icon_public_id TEXT,
+      icon_key TEXT
+    );
+    CREATE TABLE IF NOT EXISTS gallery_images (
+      id SERIAL PRIMARY KEY,
+      folder_slug TEXT REFERENCES gallery_folders(slug) ON DELETE CASCADE,
+      public_id TEXT UNIQUE NOT NULL,
+      url TEXT NOT NULL,
+      filename TEXT NOT NULL,
+      enabled BOOLEAN DEFAULT TRUE,
+      order_index INT DEFAULT 0,
+      bytes INT,
+      uploaded_at TIMESTAMPTZ DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_gallery_images_folder ON gallery_images (folder_slug);
+    CREATE INDEX IF NOT EXISTS idx_gallery_images_enabled ON gallery_images (enabled);
+  `);
+  console.log('DB ready: gallery');
+}
+async function ensureEbooksTables() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ebook_folders (
+      slug TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      enabled BOOLEAN DEFAULT TRUE
+    );
+    CREATE TABLE IF NOT EXISTS ebook_files (
+      id SERIAL PRIMARY KEY,
+      folder_slug TEXT REFERENCES ebook_folders(slug) ON DELETE CASCADE,
+      public_id TEXT UNIQUE NOT NULL,
+      url TEXT NOT NULL,
+      filename TEXT NOT NULL,
+      enabled BOOLEAN DEFAULT TRUE,
+      order_index INT DEFAULT 0,
+      bytes INT,
+      uploaded_at TIMESTAMPTZ DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_ebook_files_folder ON ebook_files (folder_slug);
+    CREATE INDEX IF NOT EXISTS idx_ebook_files_enabled ON ebook_files (enabled);
+  `);
+  console.log('DB ready: ebooks');
+}
+async function ensureCategoriesTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS categories (
+      id SERIAL PRIMARY KEY,
+      name TEXT UNIQUE NOT NULL,
+      enabled BOOLEAN DEFAULT TRUE,
+      created_at TIMESTAMPTZ DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_categories_enabled ON categories (enabled);
+  `);
+  console.log('DB ready: categories');
+}
+
+/* ===================== Categories (basic CRUD; persistent) ===================== */
+app.get('/api/categories', authRole(['user','admin','mainadmin']), async (req, res) => {
   try {
-    const foldersArr = app.locals.folders || [];
-    const allDonations = Array.isArray(donations) ? donations : [];
-    const allExpenses = Array.isArray(app.locals.expenses) ? app.locals.expenses : [];
+    await ensureCategoriesTable();
+    const role = req.user?.role || 'user';
+    const isAdmin = role === 'admin' || role === 'mainadmin';
+    const includeDisabled = ['1','true'].includes(String(req.query.includeDisabled || '').toLowerCase());
+    let sql = 'SELECT id, name, enabled, created_at FROM categories';
+    if (!isAdmin && !includeDisabled) sql += ' WHERE enabled = true';
+    sql += ' ORDER BY lower(name) ASC';
+    const { rows } = await pool.query(sql);
+    res.json(rows);
+  } catch (e) { console.error('categories list error:', e); res.status(500).send('Failed to list categories'); }
+});
 
-    const eq = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
-    const isApprovedEnabledExpense = (e) => e && e.approved === true && e.enabled !== false;
-
-    const out = [];
-
-    for (const folder of foldersArr) {
-      const events = Array.isArray(folder.events) ? folder.events : [];
-      const eventsMap = {};
-
-      for (const ev of events) {
-        const evName = (ev && (ev.name || ev.eventName || ev.title || ev.label)) || '';
-        const showDonationDetail = ev && ev.showDonationDetail !== false;
-        const showExpenseDetail = ev && ev.showExpenseDetail !== false;
-
-        const dList = allDonations.filter(d => isApproved(d) && eq(d.category, evName));
-        const donationTotal = dList.reduce((s, d) => s + Number(d.amount || 0), 0);
-
-        const eList = allExpenses.filter(e => isApprovedEnabledExpense(e) && eq(e.category, evName));
-        const expenseTotal = eList.reduce((s, e) => s + Number(e.amount || 0), 0);
-
-        const donationsSlim = dList.map(d => ({
-          id: d.id,
-          donorName: d.donorName || d.donorUsername || '',
-          amount: Number(d.amount || 0),
-          paymentMethod: d.paymentMethod || '',
-          category: d.category || '',
-          createdAt: d.createdAt || null,
-          receiptCode: d.receiptCode || d.code || null,
-        }));
-
-        eventsMap[evName] = {
-          donationTotal,
-          expenseTotal,
-          balance: donationTotal - expenseTotal,
-          donations: donationsSlim,
-          config: {
-            showDonationDetail,
-            showExpenseDetail,
-            enabled: !(ev && ev.enabled === false),
-          },
-        };
-      }
-
-      out.push({
-        folderName: folder.name || '',
-        folderId: folder.id || '',
-        events: eventsMap,
-      });
-    }
-
-    return res.json(out);
+app.post('/api/categories', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureCategoriesTable();
+    const { name, enabled } = req.body || {};
+    const nm = String(name || '').trim();
+    if (!nm) return res.status(400).json({ error: 'name required' });
+    const en = !(enabled === false || enabled === 'false' || enabled === 0 || enabled === '0');
+    const { rows } = await pool.query('INSERT INTO categories (name, enabled) VALUES ($1,$2) RETURNING *', [nm, en]);
+    res.status(201).json(rows[0]);
   } catch (e) {
-    console.error('analytics summary error:', e);
-    res.status(500).send('Analytics summary failed');
+    if ((e.code || '').startsWith('23')) return res.status(409).json({ error: 'category already exists' });
+    console.error('categories create error:', e); res.status(500).send('Create failed');
   }
 });
 
-/* ===================== Gallery endpoints (legacy/local FS) ===================== */
-
-// GET /gallery/folders (admins always see disabled; users see only enabled; returns order)
-app.get('/gallery/folders', authRole(['user', 'admin', 'mainadmin']), (req, res) => {
+app.put('/api/categories/:id', authRole(['admin','mainadmin']), async (req, res) => {
   try {
-    const host = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
-    if (!fs.existsSync(galleryDir)) fs.mkdirSync(galleryDir, { recursive: true });
+    await ensureCategoriesTable();
+    const { id } = req.params;
+    const { name, enabled } = req.body || {};
+    const fields = []; const vals = []; let idx = 1;
+    if (typeof name === 'string' && name.trim()) { fields.push(`name = $${idx++}`); vals.push(name.trim()); }
+    if (enabled !== undefined) { fields.push(`enabled = $${idx++}`); vals.push(!(enabled === false || enabled === 'false' || enabled === 0 || enabled === '0')); }
+    if (!fields.length) return res.status(400).json({ error: 'No changes' });
+    vals.push(id);
+    const { rows } = await pool.query(`UPDATE categories SET ${fields.join(', ')} WHERE id=$${idx} RETURNING *`, vals);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    res.json(rows[0]);
+  } catch (e) {
+    if ((e.code || '').startsWith('23')) return res.status(409).json({ error: 'duplicate name' });
+    console.error('categories update error:', e); res.status(500).send('Update failed');
+  }
+});
 
+app.delete('/api/categories/:id', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureCategoriesTable();
+    const { id } = req.params;
+    const { rowCount } = await pool.query('DELETE FROM categories WHERE id=$1', [id]);
+    if (!rowCount) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true });
+  } catch (e) { console.error('categories delete error:', e); res.status(500).send('Delete failed'); }
+});
+
+/* ===================== Expenses (Postgres) ===================== */
+function rowToExpense(r) {
+  return {
+    id: r.id,
+    amount: Number(r.amount),
+    category: r.category,
+    description: r.description,
+    paidTo: r.paid_to,
+    date: r.date,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+    enabled: r.enabled,
+    approved: r.approved,
+    status: r.status,
+    submittedBy: r.submitted_by,
+    submittedById: r.submitted_by_id,
+    approvedBy: r.approved_by,
+    approvedById: r.approved_by_id,
+    approvedAt: r.approved_at
+  };
+}
+
+app.get('/api/expenses/list', authRole(['user','admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureExpensesTable();
+    const role = req.user?.role || 'user';
+    const isAdmin = role === 'admin' || role === 'mainadmin';
+    const q = (req.query.category || req.query.eventName || req.query.eventId || '').toString().trim().toLowerCase();
+    const statusQ = (req.query.status || (isAdmin ? 'all' : 'approved')).toString().toLowerCase();
+    const includeDisabled = ['1','true'].includes(String(req.query.includeDisabled || '').toLowerCase());
+    const includePendingMine = ['1','true'].includes(String(req.query.includePendingMine || req.query.mine || '').toLowerCase());
+
+    const values = [];
+    let where = [];
+    if (q) { values.push(q); where.push('lower(category) = $' + values.length); }
+
+    if (isAdmin) {
+      if (statusQ === 'approved') where.push('approved = true');
+      else if (statusQ === 'pending') where.push('approved = false');
+      if (!includeDisabled) where.push('enabled = true');
+
+      let sql = 'SELECT * FROM expenses';
+      if (where.length) sql += ' WHERE ' + where.join(' AND ');
+      sql += ' ORDER BY COALESCE(date, created_at) DESC';
+      const { rows } = await pool.query(sql, values);
+      return res.json(rows.map(rowToExpense));
+    } else {
+      // approved+enabled
+      let sql = `SELECT * FROM expenses WHERE approved = true AND enabled = true`;
+      if (where.length) sql += ' AND ' + where.join(' AND ');
+      const { rows: approvedEnabled } = await pool.query(sql, values);
+      let list = approvedEnabled.map(rowToExpense);
+
+      if (includePendingMine && req.user?.username) {
+        const mineVals = values.slice();
+        mineVals.push(req.user.username);
+        let mineWhere = where.length ? ' AND ' + where.join(' AND ') : '';
+        const { rows: mine } = await pool.query(
+          `SELECT * FROM expenses WHERE submitted_by = $${mineVals.length} AND approved = false${mineWhere}`, mineVals
+        );
+        const seen = new Set(list.map(x=>x.id));
+        for (const r of mine) { if (!seen.has(r.id)) list.push(rowToExpense(r)); }
+      }
+
+      list.sort((a,b)=> new Date(b.date||b.createdAt) - new Date(a.date||a.createdAt));
+      return res.json(list);
+    }
+  } catch (e) {
+    console.error('list expenses error:', e);
+    res.status(500).send('Failed to list expenses');
+  }
+});
+
+app.post('/api/expenses/submit', authRole(['user','admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureExpensesTable();
+    const { amount, category, eventName, description, paidTo, date } = req.body || {};
+    const cat = (category || eventName || '').toString().trim();
+    const amt = Number(amount);
+    if (!cat) return res.status(400).json({ error: 'category (event) is required' });
+    if (!Number.isFinite(amt)) return res.status(400).json({ error: 'amount must be a number' });
+    const now = new Date();
+    const { rows } = await pool.query(
+      `INSERT INTO expenses (amount, category, description, paid_to, date, created_at, updated_at, enabled, approved, status, submitted_by, submitted_by_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$6,true,false,'pending',$7,$8) RETURNING *`,
+      [amt, cat, (description||'').trim(), (paidTo||'').trim(), date ? new Date(date) : now, now, req.user?.username || null, req.user?.id || null]
+    );
+    const e = rowToExpense(rows[0]);
+    if (e.submittedBy) {
+      pushNotification(e.submittedBy, {
+        type: 'expenseSubmit',
+        title: 'Expense submitted',
+        body: `${e.category} • ₹${e.amount} (pending approval)`,
+        data: { id: e.id, category: e.category, amount: e.amount, approved: false },
+      });
+    }
+    res.status(201).json({ message: 'Expense submitted (pending)', expense: e });
+  } catch (err) {
+    console.error('submit expense error:', err);
+    res.status(500).send('Submit expense failed');
+  }
+});
+
+app.post('/api/expenses', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureExpensesTable();
+    const { amount, category, description, paidTo, date, approveNow } = req.body || {};
+    if (amount === undefined) return res.status(400).json({ error: 'amount is required' });
+    const amt = Number(amount);
+    if (!Number.isFinite(amt)) return res.status(400).json({ error: 'amount must be a number' });
+    const cat = (category || '').toString().trim();
+    if (!cat) return res.status(400).json({ error: 'category is required' });
+
+    const approve = !(approveNow === false || approveNow === 'false');
+    const now = new Date();
+    const { rows } = await pool.query(
+      `INSERT INTO expenses (amount, category, description, paid_to, date, created_at, updated_at, enabled, approved, status, submitted_by, submitted_by_id, approved_by, approved_by_id, approved_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$6,true,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
+      [amt, cat, (description||'').trim(), (paidTo||'').trim(), date ? new Date(date) : now, now,
+       approve, (approve ? 'approved' : 'pending'), req.user?.username || null, req.user?.id || null,
+       approve ? req.user?.username : null, approve ? req.user?.id : null, approve ? now : null]
+    );
+    res.status(201).json({ message: 'Expense created', expense: rowToExpense(rows[0]) });
+  } catch (err) {
+    console.error('create expense error:', err);
+    res.status(500).send('Create expense failed');
+  }
+});
+
+app.put('/api/expenses/:id', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureExpensesTable();
+    const { id } = req.params;
+    const body = req.body || {};
+    const fields = []; const vals = []; let idx = 1;
+
+    if (body.amount !== undefined) {
+      const amt = Number(body.amount);
+      if (!Number.isFinite(amt)) return res.status(400).json({ error: 'amount must be a number' });
+      fields.push(`amount = $${idx++}`); vals.push(amt);
+    }
+    if (typeof body.category === 'string') { fields.push(`category = $${idx++}`); vals.push(body.category.trim()); }
+    if (typeof body.description === 'string') { fields.push(`description = $${idx++}`); vals.push(body.description.trim()); }
+    if (typeof body.paidTo === 'string') { fields.push(`paid_to = $${idx++}`); vals.push(body.paidTo.trim()); }
+    if (body.date) { fields.push(`date = $${idx++}`); vals.push(new Date(body.date)); }
+    if (body.enabled !== undefined) { fields.push(`enabled = $${idx++}`); vals.push(!(body.enabled === false || body.enabled === 'false')); }
+
+    fields.push(`updated_at = now()`);
+    vals.push(id);
+    const { rows } = await pool.query(`UPDATE expenses SET ${fields.join(', ')} WHERE id=$${idx} RETURNING *`, vals);
+    if (!rows.length) return res.status(404).json({ error: 'Expense not found' });
+    res.json({ message: 'Expense updated', expense: rowToExpense(rows[0]) });
+  } catch (err) {
+    console.error('update expense error:', err);
+    res.status(500).send('Update expense failed');
+  }
+});
+
+app.post('/api/expenses/:id/enable', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureExpensesTable();
+    const { id } = req.params;
+    const enabledRaw = req.body.enabled;
+    const enabled = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
+    const { rows } = await pool.query(`UPDATE expenses SET enabled=$1, updated_at=now() WHERE id=$2 RETURNING *`, [enabled, id]);
+    if (!rows.length) return res.status(404).json({ error: 'Expense not found' });
+    res.json({ ok: true, expense: rowToExpense(rows[0]) });
+  } catch (e) {
+    console.error('enable expense error:', e);
+    res.status(500).send('Failed to enable/disable expense');
+  }
+});
+
+app.post('/admin/expenses/:id/approve', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureExpensesTable();
+    const { id } = req.params;
+    const approveRaw = req.body.approve;
+    const approve = (approveRaw === true || approveRaw === 'true' || approveRaw === 1 || approveRaw === '1');
+
+    const { rows } = await pool.query(
+      `UPDATE expenses SET approved=$1, status=$2, approved_by=$3, approved_by_id=$4, approved_at=$5, updated_at=now()
+       WHERE id=$6 RETURNING *`,
+      [approve, approve ? 'approved' : 'pending', req.user.username, req.user.id, approve ? new Date() : null, id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Expense not found' });
+
+    const e = rowToExpense(rows[0]);
+    const who = e.submittedBy || null;
+    if (who) {
+      pushNotification(who, {
+        type: `expense${approve ? 'Approval' : 'Pending'}`,
+        title: `Expense ${approve ? 'approved' : 'set to pending'}`,
+        body: `${e.category} • ₹${e.amount}`,
+        data: { id: e.id, category: e.category, approved: approve },
+      });
+    }
+    res.json({ message: `Expense ${approve ? 'approved' : 'set to pending'}`, expense: e });
+  } catch (e) {
+    console.error('approve expense error:', e);
+    res.status(500).send('Approval failed');
+  }
+});
+
+app.delete('/api/expenses/:id', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureExpensesTable();
+    const { id } = req.params;
+    const { rows } = await pool.query('DELETE FROM expenses WHERE id=$1 RETURNING *', [id]);
+    if (!rows.length) return res.status(404).json({ error: 'Expense not found' });
+    res.json({ message: 'Expense deleted', expense: rowToExpense(rows[0]) });
+  } catch (err) {
+    console.error('delete expense error:', err);
+    res.status(500).send('Delete expense failed');
+  }
+});
+
+/* ===================== Donations (Postgres + Cloudinary screenshot) ===================== */
+const donationScreenshotStorage = new CloudinaryStorage({
+  cloudinary,
+  params: { folder: 'setapur/screenshots', allowed_formats: ['jpg','jpeg','png','webp','gif'], resource_type: 'image' },
+});
+const uploadDonation = multer({ storage: donationScreenshotStorage, limits: { fileSize: 20 * 1024 * 1024 } });
+
+async function receiptCodeExists(code) {
+  const { rows } = await pool.query('SELECT 1 FROM donations WHERE upper(receipt_code) = upper($1) LIMIT 1', [code]);
+  return rows.length > 0;
+}
+async function generateUniqueReceiptCodeDB() {
+  let code, tries=0;
+  do { code = generate6CharAlnumMix(); tries++; } while (tries<1000 && await receiptCodeExists(code));
+  return code;
+}
+function rowToDonation(r) {
+  return {
+    id: r.id,
+    donorUserId: r.donor_user_id,
+    donorUsername: r.donor_username,
+    donorName: r.donor_name,
+    amount: Number(r.amount),
+    paymentMethod: r.payment_method,
+    category: r.category,
+    cashReceiverName: r.cash_receiver_name,
+    approved: r.approved,
+    status: r.status,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+    screenshotPath: r.screenshot_public_id,
+    screenshotUrl: r.screenshot_url,
+    code: r.receipt_code,
+    receiptCode: r.receipt_code,
+    approvedBy: r.approved_by,
+    approvedById: r.approved_by_id,
+    approvedByRole: r.approved_by_role,
+    approvedByName: r.approved_by_name,
+    approvedAt: r.approved_at
+  };
+}
+
+app.post('/api/donations/submit-donation', authRole(['user','admin','mainadmin']), uploadDonation.single('screenshot'), async (req, res) => {
+  try {
+    await ensureDonationsTable();
+    const { amount, paymentMethod, category, cashReceiverName, donorName } = req.body || {};
+    if (!donorName || !String(donorName).trim()) return res.status(400).json({ error: 'donorName is required' });
+    if (!amount || !paymentMethod || !category) return res.status(400).json({ error: 'amount, paymentMethod, and category are required' });
+
+    const code = await generateUniqueReceiptCodeDB();
+    const screenshotUrl = req.file?.path || null;
+    const screenshotPublicId = req.file?.filename || null;
+
+    const { rows } = await pool.query(
+      `INSERT INTO donations
+       (donor_user_id, donor_username, donor_name, amount, payment_method, category, cash_receiver_name,
+        approved, status, created_at, updated_at, screenshot_public_id, screenshot_url, receipt_code)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,false,'pending',now(),now(),$8,$9,$10)
+       RETURNING *`,
+      [req.user.id, req.user.username, String(donorName).trim(), Number(amount), paymentMethod, category,
+       cashReceiverName || null, screenshotPublicId, screenshotUrl, code]
+    );
+    res.status(201).json({ message: 'Donation submitted', donation: rowToDonation(rows[0]) });
+  } catch (err) {
+    console.error('submit-donation error:', err);
+    res.status(500).send('Failed to submit donation');
+  }
+});
+// alias
+app.post('/api/donations/create', authRole(['user','admin','mainadmin']), uploadDonation.single('screenshot'), async (req, res) => {
+  // same as submit-donation
+  const handler = app._router.stack.find(l => l.route && l.route.path === '/api/donations/submit-donation' && l.route.methods.post);
+  if (handler) return handler.handle_method(req, res, 'post');
+  res.status(500).send('Handler missing');
+});
+
+app.get('/myaccount/receipts', authRole(['user','admin','mainadmin']), async (req, res) => {
+  await ensureDonationsTable();
+  const username = req.user.username;
+  const { rows } = await pool.query(
+    `SELECT * FROM donations WHERE approved = true AND (
+      donor_username = $1 OR donor_name = $1
+    ) ORDER BY created_at DESC`, [username]
+  );
+  res.json(rows.map(rowToDonation));
+});
+
+app.get('/api/donations/donations', authRole(['user','admin','mainadmin']), async (req, res) => {
+  await ensureDonationsTable();
+  const status = String(req.query.status || 'approved').toLowerCase();
+  const role = req.user.role;
+  const q = (req.query.q || req.query.search || '').toString().trim();
+
+  if ((role === 'admin' || role === 'mainadmin') && status === 'all') {
+    let sql = 'SELECT * FROM donations';
+    let vals = [];
+    if (q) {
+      sql += ` WHERE lower(coalesce(donor_name,'')) ILIKE lower($1)
+            OR lower(coalesce(donor_username,'')) ILIKE lower($1)
+            OR lower(coalesce(receipt_code,'')) ILIKE lower($1)
+            OR lower(coalesce(category,'')) ILIKE lower($1)`;
+      vals = [`%${q}%`];
+    }
+    sql += ' ORDER BY created_at DESC';
+    const { rows } = await pool.query(sql, vals);
+    return res.json(rows.map(r => redactDonationForRole(rowToDonation(r), role)));
+  }
+
+  // mine
+  let where = ` WHERE (donor_username = $1 OR donor_name = $1)`;
+  const vals = [req.user.username];
+  if (status === 'pending') where += ' AND approved = false';
+  else if (status === 'approved') where += ' AND approved = true';
+  if (q) {
+    where += ` AND (lower(coalesce(donor_name,'')) ILIKE lower($2)
+                OR lower(coalesce(receipt_code,'')) ILIKE lower($2)
+                OR lower(coalesce(category,'')) ILIKE lower($2))`;
+    vals.push(`%${q}%`);
+  }
+  const { rows } = await pool.query(`SELECT * FROM donations ${where} ORDER BY created_at DESC`, vals);
+  res.json(rows.map(r => redactDonationForRole(rowToDonation(r), role)));
+});
+
+app.get('/api/donations/all-donations', authRole(['admin', 'mainadmin']), async (req, res) => {
+  await ensureDonationsTable();
+  const role = req.user.role;
+  const q = (req.query.q || req.query.search || '').toString().trim();
+  let sql = 'SELECT * FROM donations';
+  let vals = [];
+  if (q) {
+    sql += ` WHERE lower(coalesce(donor_name,'')) ILIKE lower($1)
+          OR lower(coalesce(donor_username,'')) ILIKE lower($1)
+          OR lower(coalesce(receipt_code,'')) ILIKE lower($1)
+          OR lower(coalesce(category,'')) ILIKE lower($1)`;
+    vals = [`%${q}%`];
+  }
+  sql += ' ORDER BY created_at DESC';
+  const { rows } = await pool.query(sql, vals);
+  res.json(rows.map(r => redactDonationForRole(rowToDonation(r), role)));
+});
+
+app.get('/api/donations/search', authRole(['user','admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureDonationsTable();
+    const role = req.user.role;
+    const isAdmin = role === 'admin' || role === 'mainadmin';
+    const q = (req.query.q || req.query.search || '').toString().trim();
+    if (!q) return res.json([]);
+    const like = `%${q}%`;
+    let sql, vals;
+    if (isAdmin) {
+      sql = `SELECT * FROM donations
+             WHERE lower(coalesce(donor_name,'')) ILIKE lower($1)
+                OR lower(coalesce(donor_username,'')) ILIKE lower($1)
+                OR lower(coalesce(receipt_code,'')) ILIKE lower($1)
+                OR lower(coalesce(category,'')) ILIKE lower($1)
+             ORDER BY created_at DESC LIMIT 100`;
+      vals = [like];
+    } else {
+      sql = `SELECT * FROM donations
+             WHERE approved = true
+               AND (lower(coalesce(donor_name,'')) ILIKE lower($1)
+                 OR lower(coalesce(receipt_code,'')) ILIKE lower($1)
+                 OR lower(coalesce(category,'')) ILIKE lower($1))
+             UNION ALL
+             SELECT * FROM donations
+              WHERE donor_username = $2 AND approved = false
+                AND (lower(coalesce(donor_name,'')) ILIKE lower($1)
+                  OR lower(coalesce(receipt_code,'')) ILIKE lower($1)
+                  OR lower(coalesce(category,'')) ILIKE lower($1))
+             ORDER BY created_at DESC LIMIT 100`;
+      vals = [like, req.user.username];
+    }
+    const { rows } = await pool.query(sql, vals);
+    res.json(rows.map(r => redactDonationForRole(rowToDonation(r), role)));
+  } catch (e) {
+    console.error('donation search error:', e);
+    res.status(500).send('Search failed');
+  }
+});
+
+app.get('/admin/donations/pending', authRole(['admin', 'mainadmin']), async (req, res) => {
+  await ensureDonationsTable();
+  const { rows } = await pool.query(`SELECT * FROM donations WHERE approved = false ORDER BY created_at DESC`);
+  res.json(rows.map(rowToDonation));
+});
+
+app.post('/admin/donations/:id/approve', authRole(['admin', 'mainadmin']), async (req, res) => {
+  try {
+    await ensureDonationsTable();
+    const { id } = req.params;
+    const { rows: curRows } = await pool.query('SELECT * FROM donations WHERE id=$1', [id]);
+    if (!curRows.length) return res.status(404).json({ error: 'Donation not found' });
+    let d = curRows[0];
+
+    // ensure receipt code valid
+    let rc = (d.receipt_code || '').toUpperCase();
+    const valid = rc.length === 6 && /^[A-Z0-9]{6}$/.test(rc) && /[A-Z]/.test(rc) && /\d/.test(rc);
+    if (!valid) rc = await generateUniqueReceiptCodeDB();
+
+    // approver display name
+    let approvedByName = req.user.username;
+    try {
+      const users = await getUsers();
+      const approver = users.find(u => u.username === req.user.username);
+      approvedByName = approver?.name || approver?.fullName || approver?.displayName || approvedByName;
+    } catch {}
+
+    const alreadyApproved = d.approved === true;
+
+    const { rows: upd } = await pool.query(
+      `UPDATE donations SET
+         approved=true, status='approved',
+         approved_by=$1, approved_by_id=$2, approved_by_role=$3, approved_by_name=$4, approved_at=now(),
+         receipt_code=$5, updated_at=now()
+       WHERE id=$6
+       RETURNING *`,
+      [req.user.username, req.user.id, req.user.role, approvedByName, rc, id]
+    );
+    const out = rowToDonation(upd[0]);
+
+    if (!alreadyApproved) {
+      const donorUser = out.donorUsername || out.donorName || null;
+      const rcOut = out.receiptCode || out.code || '';
+      if (donorUser) {
+        pushNotification(donorUser, {
+          type: 'donationApproval',
+          title: 'Donation approved',
+          body: `Receipt: ${rcOut || 'N/A'} • Event: ${out.category} • Amount: ₹${pgNum(out.amount)}`,
+          data: { receiptCode: rcOut || null, category: out.category, amount: out.amount, paymentMethod: out.paymentMethod, approved: true },
+        });
+      }
+    }
+
+    res.json({ message: 'Donation approved', donation: out });
+  } catch (err) {
+    console.error('admin approve error:', err);
+    return res.status(500).send('Approval failed');
+  }
+});
+
+app.post('/admin/donations/:id/disapprove', authRole(['admin', 'mainadmin']), async (req, res) => {
+  try {
+    await ensureDonationsTable();
+    const { id } = req.params;
+    const { rows } = await pool.query(
+      `UPDATE donations SET approved=false, status='pending',
+       approved_by=NULL, approved_by_id=NULL, approved_by_role=NULL, approved_by_name=NULL, approved_at=NULL, updated_at=now()
+       WHERE id=$1 RETURNING *`, [id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Donation not found' });
+    res.json({ message: 'Donation set to pending', donation: rowToDonation(rows[0]) });
+  } catch (err) {
+    console.error('admin disapprove error:', err);
+    return res.status(500).send('Disapprove failed');
+  }
+});
+
+app.put('/admin/donations/:id', authRole(['admin', 'mainadmin']), async (req, res) => {
+  try {
+    await ensureDonationsTable();
+    const { id } = req.params;
+    const body = req.body || {};
+
+    const fields = []; const vals = []; let idx = 1;
+
+    if (body.amount !== undefined) {
+      const amt = Number(body.amount);
+      if (!Number.isFinite(amt)) return res.status(400).json({ error: 'amount must be a number' });
+      fields.push(`amount = $${idx++}`); vals.push(amt);
+    }
+    if (typeof body.donorName === 'string') { fields.push(`donor_name = $${idx++}`); vals.push(body.donorName.trim()); }
+    if (typeof body.category === 'string') { fields.push(`category = $${idx++}`); vals.push(body.category.trim()); }
+    if (typeof body.paymentMethod === 'string') { fields.push(`payment_method = $${idx++}`); vals.push(body.paymentMethod.trim()); }
+    if (typeof body.cashReceiverName === 'string') { fields.push(`cash_receiver_name = $${idx++}`); vals.push(body.cashReceiverName.trim()); }
+
+    if (typeof body.receiptCode === 'string' && body.receiptCode.trim()) {
+      const rc = body.receiptCode.trim().toUpperCase();
+      const valid = rc.length === 6 && /^[A-Z0-9]{6}$/.test(rc) && /[A-Z]/.test(rc) && /\d/.test(rc);
+      if (!valid) return res.status(400).json({ error: 'receiptCode must be 6-char A-Z0-9 with at least 1 letter & 1 digit' });
+      // uniqueness
+      const { rows: dup } = await pool.query('SELECT 1 FROM donations WHERE upper(receipt_code) = upper($1) AND id <> $2 LIMIT 1', [rc, id]);
+      if (dup.length) return res.status(409).json({ error: 'receiptCode already exists' });
+      fields.push(`receipt_code = $${idx++}`); vals.push(rc);
+    }
+    if (body.regenerateReceiptCode === true || body.regenerateReceiptCode === 'true') {
+      const rc = await generateUniqueReceiptCodeDB();
+      fields.push(`receipt_code = $${idx++}`); vals.push(rc);
+    }
+
+    fields.push(`updated_at = now()`);
+    vals.push(id);
+    const { rows } = await pool.query(`UPDATE donations SET ${fields.join(', ')} WHERE id=$${idx} RETURNING *`, vals);
+    if (!rows.length) return res.status(404).json({ error: 'Donation not found' });
+    res.json({ message: 'Donation updated', donation: rowToDonation(rows[0]) });
+  } catch (e) {
+    console.error('update donation error:', e);
+    res.status(500).send('Update donation failed');
+  }
+});
+app.put('/api/donations/:id', authRole(['admin', 'mainadmin']), async (req, res) => {
+  // alias to admin path
+  req.url = `/admin/donations/${req.params.id}`;
+  const layer = app._router.stack.find(l => l.route && l.route.path === '/admin/donations/:id' && l.route.methods.put);
+  if (layer) return layer.handle_method(req, res, 'put');
+  res.status(500).send('Handler missing');
+});
+
+app.post('/api/donations/approve', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureDonationsTable();
+    const { id, approve } = req.body || {};
+    if (!id) return res.status(400).json({ error: 'id required' });
+    const wantApprove = (approve === true || approve === 'true' || approve === 1 || approve === '1');
+
+    if (wantApprove) {
+      const { rows: curRows } = await pool.query('SELECT * FROM donations WHERE id=$1', [id]);
+      if (!curRows.length) return res.status(404).json({ error: 'Donation not found' });
+      let d = curRows[0];
+
+      let rc = (d.receipt_code || '').toUpperCase();
+      const valid = rc.length === 6 && /^[A-Z0-9]{6}$/.test(rc) && /[A-Z]/.test(rc) && /\d/.test(rc);
+      if (!valid) rc = await generateUniqueReceiptCodeDB();
+
+      let approvedByName = req.user.username;
+      try {
+        const users = await getUsers();
+        const approver = users.find(u => u.username === req.user.username);
+        approvedByName = approver?.name || approver?.fullName || approver?.displayName || approvedByName;
+      } catch {}
+
+      const alreadyApproved = d.approved === true;
+
+      const { rows: upd } = await pool.query(
+        `UPDATE donations SET
+           approved=true, status='approved',
+           approved_by=$1, approved_by_id=$2, approved_by_role=$3, approved_by_name=$4, approved_at=now(),
+           receipt_code=$5, updated_at=now()
+         WHERE id=$6
+         RETURNING *`,
+        [req.user.username, req.user.id, req.user.role, approvedByName, rc, id]
+      );
+      const out = rowToDonation(upd[0]);
+
+      if (!alreadyApproved) {
+        const donorUser = out.donorUsername || out.donorName || null;
+        const rcOut = out.receiptCode || out.code || '';
+        if (donorUser) {
+          pushNotification(donorUser, {
+            type: 'donationApproval',
+            title: 'Donation approved',
+            body: `Receipt: ${rcOut || 'N/A'} • Event: ${out.category} • Amount: ₹${pgNum(out.amount)}`,
+            data: { receiptCode: rcOut || null, category: out.category, amount: out.amount, paymentMethod: out.paymentMethod, approved: true },
+          });
+        }
+      }
+      return res.json({ message: 'Donation approved', donation: out });
+    } else {
+      const { rows } = await pool.query(
+        `UPDATE donations SET approved=false, status='pending',
+         approved_by=NULL, approved_by_id=NULL, approved_by_role=NULL, approved_by_name=NULL, approved_at=NULL, updated_at=now()
+         WHERE id=$1 RETURNING *`, [id]
+      );
+      if (!rows.length) return res.status(404).json({ error: 'Donation not found' });
+      return res.json({ message: 'Donation set to pending', donation: rowToDonation(rows[0]) });
+    }
+  } catch (e) {
+    console.error('alias /api/donations/approve error:', e);
+    res.status(500).send('Operation failed');
+  }
+});
+
+/* ===================== Gallery (Cloudinary + Postgres) ===================== */
+const ALLOWED_ICON_KEYS = new Set([
+  'temple','event','flower','music','book','home','star','people','calendar','camera','donation','festival'
+]);
+
+const uploadGalleryCloud = multer({
+  storage: new CloudinaryStorage({
+    cloudinary,
+    params: async (req, file) => {
+      const slug = String(req.params.slug || req.query.slug || '_root').trim() || '_root';
+      const base = path.basename(file.originalname || 'image', path.extname(file.originalname || ''));
+      const safeBase = slugify(base) || 'img';
+      return {
+        folder: `setapur/gallery/${slug}`,
+        public_id: `${Date.now()}-${Math.round(Math.random()*1e9)}-${safeBase}`,
+        allowed_formats: ['jpg','jpeg','png','webp','gif'],
+        resource_type: 'image'
+      };
+    },
+  }),
+  limits: { fileSize: 20 * 1024 * 1024, files: 25 },
+});
+
+async function ensureGalleryFolder(slug, name) {
+  await ensureGalleryTables();
+  const s = slug || '_root';
+  const n = name || s.replace(/-/g, ' ');
+  await pool.query(
+    `INSERT INTO gallery_folders (slug, name, enabled, order_index)
+     VALUES ($1,$2,true, COALESCE((SELECT COALESCE(MAX(order_index),-1)+1 FROM gallery_folders),0))
+     ON CONFLICT (slug) DO NOTHING`,
+    [s, n]
+  );
+}
+
+async function reorderGalleryImages(folderSlug, targetIdOrName, direction, newIndex) {
+  const { rows } = await pool.query('SELECT id, filename FROM gallery_images WHERE folder_slug=$1 ORDER BY order_index ASC, lower(filename) ASC', [folderSlug]);
+  let list = rows.map(r => ({ id: r.id, name: r.filename }));
+  let idx = list.findIndex(x => String(x.id) === String(targetIdOrName) || String(x.name) === String(targetIdOrName));
+  if (idx === -1) return;
+
+  if (typeof newIndex === 'number' && Number.isFinite(newIndex)) {
+    const item = list.splice(idx,1)[0];
+    list.splice(Math.max(0, Math.min(newIndex, list.length)), 0, item);
+  } else if (direction === 'up' && idx > 0) {
+    [list[idx-1], list[idx]] = [list[idx], list[idx-1]];
+  } else if (direction === 'down' && idx >= 0 && idx < list.length - 1) {
+    [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
+  }
+  // write back order_index
+  for (let i=0;i<list.length;i++) {
+    await pool.query('UPDATE gallery_images SET order_index=$1 WHERE id=$2', [i, list[i].id]);
+  }
+}
+
+async function reorderGalleryFolders(slug, direction, newIndex) {
+  const { rows } = await pool.query('SELECT slug FROM gallery_folders ORDER BY order_index ASC, lower(name) ASC');
+  let list = rows.map(r => r.slug);
+  let idx = list.indexOf(slug);
+  if (idx === -1) return;
+  if (typeof newIndex === 'number' && Number.isFinite(newIndex)) {
+    const item = list.splice(idx,1)[0];
+    list.splice(Math.max(0, Math.min(newIndex, list.length)), 0, item);
+  } else if (direction === 'up' && idx > 0) {
+    [list[idx-1], list[idx]] = [list[idx], list[idx-1]];
+  } else if (direction === 'down' && idx >= 0 && idx < list.length - 1) {
+    [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
+  }
+  for (let i=0;i<list.length;i++) {
+    await pool.query('UPDATE gallery_folders SET order_index=$1 WHERE slug=$2', [i, list[i]]);
+  }
+}
+
+// List folders
+app.get('/gallery/folders', authRole(['user', 'admin', 'mainadmin']), async (req, res) => {
+  try {
+    await ensureGalleryTables();
     const role = (req.user && req.user.role) || 'user';
     const isAdmin = role === 'admin' || role === 'mainadmin';
     const includeDisabledQ = String(req.query.includeDisabled || '').toLowerCase();
     const includeDisabled = includeDisabledQ === '1' || includeDisabledQ === 'true';
-    const showDisabled = isAdmin || includeDisabled;
-
-    const rootMeta = ensureFolderOrderComplete();
-    const orderIdx = new Map(rootMeta.folderOrder.map((s,i) => [s, i]));
-
-    const entries = fs.readdirSync(galleryDir, { withFileTypes: true });
-
-    let foldersOut = [];
-    for (const ent of entries) {
-      if (!ent.isDirectory()) continue;
-
-      const slug = ent.name;
-      const folderPath = path.join(galleryDir, slug);
-      const { meta } = getFolderMeta(slug);
-
-      let name = meta.name || slug.replace(/-/g, ' ');
-      let coverFile = null, coverUrl = null;
-      let iconFile = null, iconUrl = null, iconKey = meta.iconKey || null;
-
-      if (meta.cover) {
-        const cf = String(meta.cover);
-        if (fs.existsSync(path.join(folderPath, cf))) {
-          coverFile = cf;
-          coverUrl = `${host}/uploads/gallery/${slug}/${encodeURIComponent(cf)}`;
-        }
-      }
-      if (meta.iconFile) {
-        const icf = String(meta.iconFile);
-        if (fs.existsSync(path.join(folderPath, icf))) {
-          iconFile = icf;
-          iconUrl = `${host}/uploads/gallery/${slug}/${encodeURIComponent(icf)}`;
-        }
-      }
-
-      foldersOut.push({
-        name,
-        slug,
-        url: `${host}/uploads/gallery/${slug}/`,
-        cover: coverFile,
-        coverUrl: coverUrl || null,
-        iconFile,
-        iconUrl: iconUrl || null,
-        iconKey: iconKey || null,
-        enabled: meta.enabled !== false,
-        order: orderIdx.has(slug) ? orderIdx.get(slug) : 999999,
-      });
-    }
-
-    foldersOut.sort((a,b) => {
-      const ao = Number(a.order || 0);
-      const bo = Number(b.order || 0);
-      if (ao !== bo) return ao - bo;
-      return String(a.name||'').toLowerCase().localeCompare(String(b.name||'').toLowerCase());
-    });
-
-    if (!showDisabled) foldersOut = foldersOut.filter(f => f.enabled !== false);
-
+    let sql = 'SELECT slug, name, enabled, order_index, cover_url, icon_public_id, icon_key FROM gallery_folders';
+    if (!isAdmin && !includeDisabled) sql += ' WHERE enabled = true';
+    sql += ' ORDER BY order_index ASC, lower(name) ASC';
+    const { rows } = await pool.query(sql);
+    const foldersOut = rows.map(r => ({
+      name: r.name,
+      slug: r.slug,
+      url: null,
+      cover: null,
+      coverUrl: r.cover_url || null,
+      iconFile: null,
+      iconUrl: null,
+      iconKey: r.icon_key || null,
+      enabled: r.enabled !== false,
+      order: r.order_index || 0,
+    }));
     res.json(foldersOut);
   } catch (e) {
     console.error('gallery list error:', e);
@@ -1319,46 +1178,137 @@ app.get('/gallery/folders', authRole(['user', 'admin', 'mainadmin']), (req, res)
   }
 });
 
-// GET /gallery/folders/:slug/images (admins always see disabled; users see only enabled)
-app.get('/gallery/folders/:slug/images', authRole(['user', 'admin', 'mainadmin']), (req, res) => {
+// Create folder
+app.post('/gallery/folders/create', authRole(['admin', 'mainadmin']), async (req, res) => {
   try {
-    const { slug } = req.params;
-    if (!slug) return res.status(400).json({ error: 'slug required' });
+    await ensureGalleryTables();
+    const { name } = req.body || {};
+    if (!name || !String(name).trim()) return res.status(400).json({ error: 'name is required' });
+    const slug = slugify(String(name));
+    await pool.query(
+      `INSERT INTO gallery_folders (slug, name, enabled, order_index)
+       VALUES ($1,$2,true, COALESCE((SELECT COALESCE(MAX(order_index),-1)+1 FROM gallery_folders),0))`,
+      [slug, String(name).trim()]
+    );
+    res.status(201).json({ name: String(name).trim(), slug });
+  } catch (e) {
+    if (String(e.message || '').toLowerCase().includes('duplicate')) return res.status(409).json({ error: 'folder already exists' });
+    console.error('gallery create error:', e);
+    res.status(500).send('Failed to create folder');
+  }
+});
 
+// Upload images to folder (Cloudinary)
+app.post('/gallery/folders/:slug/upload', authRole(['admin', 'mainadmin']), uploadGalleryCloud.array('images', 25), async (req, res) => {
+  try {
+    await ensureGalleryTables();
+    const { slug } = req.params;
+    await ensureGalleryFolder(slug);
+    const files = req.files || [];
+    if (!files.length) return res.status(400).json({ error: 'No files uploaded' });
+
+    const { rows: r0 } = await pool.query('SELECT COALESCE(MAX(order_index), -1) AS m FROM gallery_images WHERE folder_slug=$1', [slug]);
+    let order = Number(r0[0]?.m || -1) + 1;
+
+    const inserted = [];
+    for (const f of files) {
+      const filename = path.basename(f.originalname || 'image').replace(/\s+/g,'-');
+      const { rows } = await pool.query(
+        `INSERT INTO gallery_images (folder_slug, public_id, url, filename, enabled, order_index, bytes)
+         VALUES ($1,$2,$3,$4,true,$5,NULL) RETURNING *`,
+        [slug, f.filename, f.path, filename, order++]
+      );
+      inserted.push(rows[0]);
+    }
+    res.status(201).json({ uploaded: inserted.map(r => ({ id:r.id, filename:r.filename, url:r.url })), count: inserted.length });
+  } catch (e) {
+    console.error('gallery upload error:', e);
+    res.status(500).send('Upload failed');
+  }
+});
+
+// Root images (list + upload) via slug '_root'
+app.get('/gallery/images', authRole(['user', 'admin', 'mainadmin']), async (req, res) => {
+  try {
+    await ensureGalleryTables();
     const role = (req.user && req.user.role) || 'user';
     const isAdmin = role === 'admin' || role === 'mainadmin';
+    const includeDisabled = ['1','true'].includes(String(req.query.includeDisabled || '').toLowerCase());
 
+    await ensureGalleryFolder('_root', 'Home');
+    let sql = 'SELECT id, filename, url, enabled, order_index, uploaded_at FROM gallery_images WHERE folder_slug=$1';
+    const vals = ['_root'];
+    if (!isAdmin && !includeDisabled) sql += ' AND enabled = true';
+    sql += ' ORDER BY order_index ASC, lower(filename) ASC';
+    const { rows } = await pool.query(sql, vals);
+    res.json(rows.map(r => ({
+      name: r.filename,
+      url: r.url,
+      size: null,
+      modifiedAt: r.uploaded_at,
+      enabled: r.enabled,
+      order: r.order_index
+    })));
+  } catch (e) {
+    console.error('gallery root images error:', e);
+    res.status(500).send('Failed to list gallery images');
+  }
+});
+app.get('/gallery/home/images', authRole(['user', 'admin', 'mainadmin']), async (req, res) => {
+  req.url = '/gallery/images';
+  const layer = app._router.stack.find(l => l.route && l.route.path === '/gallery/images' && l.route.methods.get);
+  if (layer) return layer.handle_method(req, res, 'get');
+  res.status(500).send('Handler missing');
+});
+
+app.post('/gallery/upload', authRole(['admin', 'mainadmin']), (req, res, next) => { req.params.slug = '_root'; next(); }, uploadGalleryCloud.array('images', 25), async (req, res) => {
+  try {
+    await ensureGalleryTables();
+    const slug = '_root';
+    await ensureGalleryFolder(slug, 'Home');
+    const files = req.files || [];
+    if (!files.length) return res.status(400).json({ error: 'No files uploaded' });
+    const { rows: r0 } = await pool.query('SELECT COALESCE(MAX(order_index), -1) AS m FROM gallery_images WHERE folder_slug=$1', [slug]);
+    let order = Number(r0[0]?.m || -1) + 1;
+    const inserted = [];
+    for (const f of files) {
+      const filename = path.basename(f.originalname || 'image').replace(/\s+/g,'-');
+      const { rows } = await pool.query(
+        `INSERT INTO gallery_images (folder_slug, public_id, url, filename, enabled, order_index, bytes)
+         VALUES ($1,$2,$3,$4,true,$5,NULL) RETURNING *`,
+        [slug, f.filename, f.path, filename, order++]
+      );
+      inserted.push(rows[0]);
+    }
+    res.status(201).json({ uploaded: inserted.map(r => ({ id:r.id, filename:r.filename, url:r.url })), count: inserted.length });
+  } catch (e) { console.error('root upload error:', e); res.status(500).send('Upload failed'); }
+});
+app.post('/gallery/home/upload', authRole(['admin', 'mainadmin']), (req,res,next)=>{ req.url='/gallery/upload'; next(); }, (req,res)=>res.end());
+
+// List images in folder
+app.get('/gallery/folders/:slug/images', authRole(['user', 'admin', 'mainadmin']), async (req, res) => {
+  try {
+    await ensureGalleryTables();
+    const { slug } = req.params;
+    const role = (req.user && req.user.role) || 'user';
+    const isAdmin = role === 'admin' || role === 'mainadmin';
     const includeDisabledQ = String(req.query.includeDisabled || '').toLowerCase();
     const includeDisabled = includeDisabledQ === '1' || includeDisabledQ === 'true';
-    const showDisabled = isAdmin || includeDisabled;
 
-    const folderPath = path.join(galleryDir, slug);
-    if (!fs.existsSync(folderPath)) return res.status(404).json({ error: 'folder not found' });
-
-    const host = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
-    const { meta } = getFolderMeta(slug);
-
-    const files = fs.readdirSync(folderPath, { withFileTypes: true })
-      .filter(ent => ent.isFile())
-      .map(ent => ent.name)
-      .filter(name => IMG_EXT.has(path.extname(name).toLowerCase()));
-
-    let list = files.map(fn => ({
-      name: fn,
-      url: `${host}/uploads/gallery/${slug}/${encodeURIComponent(fn)}`,
-      enabled: !(meta.disabledImages && meta.disabledImages[fn] === true),
-      mtime: fs.statSync(path.join(folderPath, fn)).mtimeMs,
-      size: fs.statSync(path.join(folderPath, fn)).size
-    }));
-
-    list = sortByOrder(list, x => x.name, meta.imageOrder || []);
-
-    if (!showDisabled) {
-      list = list.filter(x => x.enabled !== false);
+    let sql = 'SELECT id, filename, url, enabled, order_index, uploaded_at FROM gallery_images WHERE folder_slug=$1';
+    const vals = [slug];
+    if (!isAdmin && !includeDisabled) {
+      sql += ' AND enabled = true';
     }
+    sql += ' ORDER BY order_index ASC, lower(filename) ASC';
+    const { rows } = await pool.query(sql, vals);
 
-    res.json(list.map(({ name, url, size, mtime, enabled }) => ({
-      name, url, size, modifiedAt: new Date(mtime).toISOString(), enabled
+    res.json(rows.map(r => ({
+      id: r.id,
+      name: r.filename,
+      url: r.url,
+      enabled: r.enabled,
+      modifiedAt: r.uploaded_at
     })));
   } catch (e) {
     console.error('gallery images error:', e);
@@ -1366,265 +1316,54 @@ app.get('/gallery/folders/:slug/images', authRole(['user', 'admin', 'mainadmin']
   }
 });
 
-// Root images: GET /gallery/images + alias /gallery/home/images
-function getRootImagesHandler(req, res) {
+// Enable/disable folder
+app.post('/gallery/folders/:slug/enable', authRole(['admin', 'mainadmin']), async (req, res) => {
   try {
-    const role = (req.user && req.user.role) || 'user';
-    const isAdmin = role === 'admin' || role === 'mainadmin';
-
-    const includeDisabled = String(req.query.includeDisabled || '').toLowerCase();
-    const showDisabled = isAdmin || includeDisabled === '1' || includeDisabled === 'true';
-
-    const host = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
-    const meta = ensureRootOrderComplete(); // ensure order has all files
-    const orderIdx = new Map((meta.rootImageOrder || []).map((n, i) => [n, i]));
-
-    const files = fs.readdirSync(galleryDir, { withFileTypes: true })
-      .filter(ent => ent.isFile())
-      .map(ent => ent.name)
-      .filter(name => IMG_EXT.has(path.extname(name).toLowerCase()));
-
-    let list = files.map(fn => ({
-      name: fn,
-      url: `${host}/uploads/gallery/${encodeURIComponent(fn)}`,
-      enabled: !(meta.disabledRootImages && meta.disabledRootImages[fn] === true),
-      mtime: fs.statSync(path.join(galleryDir, fn)).mtimeMs,
-      size: fs.statSync(path.join(galleryDir, fn)).size,
-      order: orderIdx.has(fn) ? orderIdx.get(fn) : Number.MAX_SAFE_INTEGER,
-    }));
-
-    // Apply order and optional filter
-    list.sort((a, b) => (a.order - b.order) || (String(a.name).localeCompare(String(b.name))));
-    if (!showDisabled) list = list.filter(x => x.enabled !== false);
-
-    res.json(list.map(({ name, url, size, mtime, enabled, order }) => ({
-      name, url, size, modifiedAt: new Date(mtime).toISOString(), enabled, order
-    })));
-  } catch (e) {
-    console.error('gallery root images error:', e);
-    res.status(500).send('Failed to list gallery images');
-  }
-}
-app.get('/gallery/images', authRole(['user', 'admin', 'mainadmin']), getRootImagesHandler);
-app.get('/gallery/home/images', authRole(['user', 'admin', 'mainadmin']), getRootImagesHandler);
-
-// Upload to folder (legacy/local)
-app.post('/gallery/folders/:slug/upload', authRole(['admin', 'mainadmin']), uploadGallery.array('images', 25), (req, res) => {
-  try {
-    const { slug } = req.params;
-    const files = req.files || [];
-    if (!slug) return res.status(400).json({ error: 'slug required' });
-    if (!files.length) return res.status(400).json({ error: 'No files uploaded' });
-
-    const host = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
-    const uploaded = files.map((f) => ({
-      name: f.filename,
-      size: f.size,
-      url: `${host}/uploads/gallery/${encodeURIComponent(slug)}/${encodeURIComponent(f.filename)}`,
-    }));
-
-    const { meta } = getFolderMeta(slug);
-    meta.imageOrder = Array.isArray(meta.imageOrder) ? meta.imageOrder : [];
-    for (const f of uploaded) {
-      if (!meta.imageOrder.includes(f.name)) meta.imageOrder.push(f.name);
-    }
-    saveFolderMeta(slug, meta);
-
-    return res.status(201).json({ uploaded, count: uploaded.length });
-  } catch (e) {
-    console.error('gallery upload error:', e);
-    res.status(500).send('Upload failed');
-  }
-});
-
-// Upload to root (outside folders) + alias (legacy/local)
-function rootUploadHandler(req, res) {
-  try {
-    const files = req.files || [];
-    if (!files.length) return res.status(400).json({ error: 'No files uploaded' });
-    const host = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
-
-    const meta = ensureRootOrderComplete();
-    for (const f of files) {
-      if (!meta.rootImageOrder.includes(f.filename)) meta.rootImageOrder.push(f.filename);
-    }
-    saveRootMeta(meta);
-
-    const uploaded = files.map(f => ({
-      name: f.filename,
-      url: `${host}/uploads/gallery/${encodeURIComponent(f.filename)}`,
-      size: f.size
-    }));
-    res.status(201).json({ uploaded, count: uploaded.length });
-  } catch (e) {
-    console.error('root upload error:', e);
-    res.status(500).send('Upload failed');
-  }
-}
-app.post('/gallery/upload', authRole(['admin', 'mainadmin']), uploadRootGallery.array('images', 25), rootUploadHandler);
-app.post('/gallery/home/upload', authRole(['admin', 'mainadmin']), uploadRootGallery.array('images', 25), rootUploadHandler);
-
-// Create folder (legacy/local)
-app.post('/gallery/folders/create', authRole(['admin', 'mainadmin']), (req, res) => {
-  try {
-    const { name } = req.body || {};
-    if (!name || !String(name).trim()) return res.status(400).json({ error: 'name is required' });
-    const slug = slugify(String(name));
-    if (!slug) return res.status(400).json({ error: 'invalid name' });
-    const dir = path.join(galleryDir, slug);
-    if (fs.existsSync(dir)) return res.status(409).json({ error: 'folder already exists', slug });
-
-    fs.mkdirSync(dir, { recursive: true });
-    saveFolderMeta(slug, { name: String(name).trim(), enabled: true, imageOrder: [], disabledImages: {} });
-
-    const meta = ensureFolderOrderComplete();
-    if (!meta.folderOrder.includes(slug)) {
-      meta.folderOrder.push(slug);
-      saveRootMeta(meta);
-    }
-
-    const host = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
-    return res.status(201).json({ name: String(name).trim(), slug, url: `${host}/uploads/gallery/${slug}/` });
-  } catch (e) {
-    console.error('gallery create error:', e);
-    res.status(500).send('Failed to create folder');
-  }
-});
-
-// Set cover (legacy/local)
-app.post('/gallery/folders/:slug/cover', authRole(['admin', 'mainadmin']), (req, res) => {
-  try {
-    const { slug } = req.params;
-    const { filename } = req.body || {};
-    if (!slug) return res.status(400).json({ error: 'slug required' });
-    if (!filename || !String(filename).trim()) return res.status(400).json({ error: 'filename is required' });
-
-    const folderPath = path.join(galleryDir, slug);
-    if (!fs.existsSync(folderPath)) return res.status(404).json({ error: 'folder not found' });
-
-    const target = path.resolve(path.join(folderPath, filename));
-    const safeRoot = path.resolve(folderPath);
-    if (!target.startsWith(safeRoot) || !fs.existsSync(target)) return res.status(404).json({ error: 'file not found in folder' });
-    const ext = path.extname(filename).toLowerCase();
-    if (!IMG_EXT.has(ext)) return res.status(400).json({ error: 'Invalid image extension' });
-
-    const { meta } = getFolderMeta(slug);
-    meta.cover = filename;
-    saveFolderMeta(slug, meta);
-    const host = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
-    const coverUrl = `${host}/uploads/gallery/${slug}/${encodeURIComponent(filename)}`;
-    res.json({ ok: true, slug, cover: filename, coverUrl });
-  } catch (e) {
-    console.error('set cover error:', e);
-    res.status(500).send('Failed to set cover');
-  }
-});
-
-// Built-in icon keys allowed
-const ALLOWED_ICON_KEYS = new Set([
-  'temple','event','flower','music','book','home','star','people','calendar','camera','donation','festival'
-]);
-// Set/Clear icon (file or built-in)
-app.post('/gallery/folders/:slug/icon', authRole(['admin', 'mainadmin']), (req, res) => {
-  try {
-    const { slug } = req.params;
-    const { filename, iconKey, clear } = req.body || {};
-    if (!slug) return res.status(400).json({ error: 'slug required' });
-
-    const folderPath = path.join(galleryDir, slug);
-    if (!fs.existsSync(folderPath)) return res.status(404).json({ error: 'folder not found' });
-
-    const { meta } = getFolderMeta(slug);
-
-    if (clear === true || clear === 'true' || clear === 1 || clear === '1') {
-      delete meta.iconFile; delete meta.iconKey;
-      saveFolderMeta(slug, meta);
-      return res.json({ ok: true, slug, iconFile: null, iconKey: null, iconUrl: null });
-    }
-
-    if (filename && String(filename).trim()) {
-      const fn = String(filename).trim();
-      const target = path.resolve(path.join(folderPath, fn));
-      const safeRoot = path.resolve(folderPath);
-      if (!target.startsWith(safeRoot) || !fs.existsSync(target)) return res.status(404).json({ error: 'file not found in folder' });
-      const ext = path.extname(fn).toLowerCase();
-      if (!IMG_EXT.has(ext)) return res.status(400).json({ error: 'Invalid image extension' });
-      meta.iconFile = fn; delete meta.iconKey;
-      saveFolderMeta(slug, meta);
-      const host = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
-      const iconUrl = `${host}/uploads/gallery/${slug}/${encodeURIComponent(fn)}`;
-      return res.json({ ok: true, slug, iconFile: fn, iconKey: null, iconUrl });
-    }
-
-    if (iconKey && String(iconKey).trim()) {
-      const key = String(iconKey).trim();
-      if (!ALLOWED_ICON_KEYS.has(key)) return res.status(400).json({ error: 'Invalid iconKey', allowed: Array.from(ALLOWED_ICON_KEYS) });
-      meta.iconKey = key; delete meta.iconFile;
-      saveFolderMeta(slug, meta);
-      return res.json({ ok: true, slug, iconFile: null, iconKey: key, iconUrl: null });
-    }
-
-    return res.status(400).json({ error: 'Provide filename OR iconKey OR clear=true' });
-  } catch (e) {
-    console.error('set icon error:', e);
-    res.status(500).send('Failed to set icon');
-  }
-});
-
-// Enable/disable folder (does NOT delete)
-app.post('/gallery/folders/:slug/enable', authRole(['admin', 'mainadmin']), (req, res) => {
-  try {
+    await ensureGalleryTables();
     const { slug } = req.params;
     const enabledRaw = req.body.enabled;
     const enabled = enabledRaw !== false && enabledRaw !== 'false' && enabledRaw !== 0 && enabledRaw !== '0';
-
-    const folderPath = path.join(galleryDir, slug);
-    if (!fs.existsSync(folderPath)) return res.status(404).json({ error: 'folder not found' });
-
-    const { meta } = getFolderMeta(slug);
-    meta.enabled = enabled;
-    saveFolderMeta(slug, meta);
-    res.json({ ok: true, slug, enabled });
+    const { rows } = await pool.query('UPDATE gallery_folders SET enabled=$1 WHERE slug=$2 RETURNING slug, name, enabled', [enabled, slug]);
+    if (!rows.length) return res.status(404).json({ error: 'folder not found' });
+    res.json({ ok: true, slug, enabled: rows[0].enabled });
   } catch (e) {
     console.error('enable folder error:', e);
     res.status(500).send('Failed to update folder enabled');
   }
 });
 
-// Reorder folders (support both endpoints)
-app.post('/gallery/folders/reorder', authRole(['admin', 'mainadmin']), (req, res) => {
+// Reorder folders
+app.post('/gallery/folders/reorder', authRole(['admin', 'mainadmin']), async (req, res) => {
   try {
+    await ensureGalleryTables();
     const { slug, direction, newIndex } = req.body || {};
     if (!slug) return res.status(400).json({ error: 'slug required' });
-
-    const meta = ensureFolderOrderComplete();
-    meta.folderOrder = Array.from(new Set(meta.folderOrder));
-    meta.folderOrder = moveInArray(meta.folderOrder, slug, direction, typeof newIndex === 'number' ? newIndex : undefined);
-    saveRootMeta(meta);
-    res.json({ ok: true, folderOrder: meta.folderOrder });
+    await reorderGalleryFolders(slug, direction, typeof newIndex === 'number' ? newIndex : undefined);
+    const { rows } = await pool.query('SELECT slug FROM gallery_folders ORDER BY order_index ASC, lower(name) ASC');
+    res.json({ ok: true, folderOrder: rows.map(r => r.slug) });
   } catch (e) {
     console.error('reorder folders error:', e);
     res.status(500).send('Failed to reorder folders');
   }
 });
-app.post('/gallery/folders/:slug/reorder', authRole(['admin', 'mainadmin']), (req, res) => {
+app.post('/gallery/folders/:slug/reorder', authRole(['admin', 'mainadmin']), async (req, res) => {
   try {
+    await ensureGalleryTables();
     const { slug } = req.params;
     const { direction, newIndex } = req.body || {};
-    const meta = ensureFolderOrderComplete();
-    meta.folderOrder = Array.from(new Set(meta.folderOrder));
-    meta.folderOrder = moveInArray(meta.folderOrder, slug, direction, typeof newIndex === 'number' ? newIndex : undefined);
-    saveRootMeta(meta);
-    res.json({ ok: true, folderOrder: meta.folderOrder });
+    await reorderGalleryFolders(slug, direction, typeof newIndex === 'number' ? newIndex : undefined);
+    const { rows } = await pool.query('SELECT slug FROM gallery_folders ORDER BY order_index ASC, lower(name) ASC');
+    res.json({ ok: true, folderOrder: rows.map(r => r.slug) });
   } catch (e) {
     console.error('reorder folders (param) error:', e);
     res.status(500).send('Failed to reorder folders');
   }
 });
 
-// Rename folder
-app.post('/gallery/folders/:slug/rename', authRole(['admin', 'mainadmin']), (req, res) => {
+// Rename folder (changes slug + updates images' folder_slug; Cloudinary assets remain)
+app.post('/gallery/folders/:slug/rename', authRole(['admin', 'mainadmin']), async (req, res) => {
   try {
+    await ensureGalleryTables();
     const { slug } = req.params;
     let { name, newName } = req.body || {};
     const desired = String((name || newName || '')).trim();
@@ -1632,38 +1371,43 @@ app.post('/gallery/folders/:slug/rename', authRole(['admin', 'mainadmin']), (req
     const newSlug = slugify(desired);
     if (!newSlug) return res.status(400).json({ error: 'invalid newName' });
 
-    const src = path.join(galleryDir, slug);
-    const dest = path.join(galleryDir, newSlug);
-    if (!fs.existsSync(src)) return res.status(404).json({ error: 'folder not found' });
-    if (fs.existsSync(dest)) return res.status(409).json({ error: 'target exists', slug: newSlug });
+    const { rows: exists } = await pool.query('SELECT 1 FROM gallery_folders WHERE slug=$1', [slug]);
+    if (!exists.length) return res.status(404).json({ error: 'folder not found' });
 
-    fs.renameSync(src, dest);
-    const { meta } = getFolderMeta(newSlug);
-    meta.name = desired;
-    saveFolderMeta(newSlug, meta);
+    const { rows: dup } = await pool.query('SELECT 1 FROM gallery_folders WHERE slug=$1', [newSlug]);
+    if (dup.length && newSlug !== slug) return res.status(409).json({ error: 'target exists', slug: newSlug });
 
-    const rootMeta = ensureFolderOrderComplete();
-    rootMeta.folderOrder = rootMeta.folderOrder.map(s => s === slug ? newSlug : s);
-    saveRootMeta(rootMeta);
+    await pool.query('BEGIN');
+    await pool.query('UPDATE gallery_images SET folder_slug=$1 WHERE folder_slug=$2', [newSlug, slug]);
+    await pool.query('UPDATE gallery_folders SET slug=$1, name=$2 WHERE slug=$3', [newSlug, desired, slug]);
+    await pool.query('COMMIT');
 
-    const host = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
-    res.json({ ok: true, slug: newSlug, name: meta.name, url: `${host}/uploads/gallery/${newSlug}/` });
+    res.json({ ok: true, slug: newSlug, name: desired });
   } catch (e) {
+    await pool.query('ROLLBACK').catch(()=>{});
     console.error('rename folder error:', e);
     res.status(500).send('Failed to rename folder');
   }
 });
 
-// Delete folder
-app.delete('/gallery/folders/:slug', authRole(['admin', 'mainadmin']), (req, res) => {
+// Delete folder (DB + Cloudinary assets by folder prefix optional)
+app.delete('/gallery/folders/:slug', authRole(['admin', 'mainadmin']), async (req, res) => {
   try {
+    await ensureGalleryTables();
     const { slug } = req.params;
-    const dir = path.join(galleryDir, slug);
-    if (!fs.existsSync(dir)) return res.status(404).json({ error: 'folder not found' });
-    fs.rmSync(dir, { recursive: true, force: true });
-    const meta = ensureFolderOrderComplete();
-    meta.folderOrder = meta.folderOrder.filter(s => s !== slug);
-    saveRootMeta(meta);
+
+    // Delete Cloudinary images within folder (optional but recommended)
+    try {
+      // NOTE: Cloudinary Admin delete by prefix; use with caution in production
+      const prefix = `setapur/gallery/${slug}`;
+      const { resources } = await cloudinary.search.expression(`folder:${prefix}`).max_results(500).execute();
+      for (const r of (resources || [])) {
+        await cloudinary.uploader.destroy(r.public_id, { resource_type: 'image' });
+      }
+    } catch (e) { console.warn('Cloudinary folder cleanup failed (non-fatal):', e.message); }
+
+    const { rowCount } = await pool.query('DELETE FROM gallery_folders WHERE slug=$1', [slug]);
+    if (!rowCount) return res.status(404).json({ error: 'folder not found' });
     res.json({ ok: true, slug });
   } catch (e) {
     console.error('delete folder error:', e);
@@ -1671,451 +1415,333 @@ app.delete('/gallery/folders/:slug', authRole(['admin', 'mainadmin']), (req, res
   }
 });
 
-// Reorder images inside folder
-app.post('/gallery/folders/:slug/images/reorder', authRole(['admin', 'mainadmin']), (req, res) => {
+// Reorder images in folder
+app.post('/gallery/folders/:slug/images/reorder', authRole(['admin', 'mainadmin']), async (req, res) => {
   try {
+    await ensureGalleryTables();
     const { slug } = req.params;
-    const { filename, direction, newIndex } = req.body || {};
-    if (!filename) return res.status(400).json({ error: 'filename required' });
-    const { meta } = getFolderMeta(slug);
-    meta.imageOrder = moveInArray(meta.imageOrder || [], String(filename), direction, typeof newIndex === 'number' ? newIndex : undefined);
-    saveFolderMeta(slug, meta);
-    res.json({ ok: true, imageOrder: meta.imageOrder });
+    const { filename, id, direction, newIndex } = req.body || {};
+    const target = id || filename;
+    if (!target) return res.status(400).json({ error: 'id or filename required' });
+    await reorderGalleryImages(slug, target, direction, typeof newIndex === 'number' ? newIndex : undefined);
+    const { rows } = await pool.query('SELECT filename FROM gallery_images WHERE folder_slug=$1 ORDER BY order_index ASC, lower(filename) ASC', [slug]);
+    res.json({ ok: true, imageOrder: rows.map(r => r.filename) });
   } catch (e) {
     console.error('reorder images error:', e);
     res.status(500).send('Failed to reorder images');
   }
 });
 
-// Enable/disable image inside folder
-app.post('/gallery/folders/:slug/images/enable', authRole(['admin', 'mainadmin']), (req, res) => {
+// Enable/disable image
+app.post('/gallery/folders/:slug/images/enable', authRole(['admin', 'mainadmin']), async (req, res) => {
   try {
+    await ensureGalleryTables();
     const { slug } = req.params;
-    const { filename } = req.body || {};
+    const { filename, id } = req.body || {};
     const enabledRaw = req.body.enabled;
     const enabled = enabledRaw !== false && enabledRaw !== 'false' && enabledRaw !== 0 && enabledRaw !== '0';
-    if (!filename) return res.status(400).json({ error: 'filename required' });
-    const { meta } = getFolderMeta(slug);
-    meta.disabledImages = meta.disabledImages || {};
-    if (enabled) delete meta.disabledImages[filename];
-    else meta.disabledImages[filename] = true;
-    saveFolderMeta(slug, meta);
-    res.json({ ok: true, filename, enabled });
+    if (!filename && !id) return res.status(400).json({ error: 'id or filename required' });
+
+    const cond = id ? 'id=$1 AND folder_slug=$2' : 'filename=$1 AND folder_slug=$2';
+    const vals = id ? [id, slug] : [String(filename), slug];
+    const { rows } = await pool.query(`UPDATE gallery_images SET enabled=$3 WHERE ${cond} RETURNING *`, [...vals, enabled]);
+    if (!rows.length) return res.status(404).json({ error: 'image not found' });
+    res.json({ ok: true, filename: rows[0].filename, enabled: rows[0].enabled });
   } catch (e) {
     console.error('enable image error:', e);
     res.status(500).send('Failed to update image enabled');
   }
 });
 
-// Rename image inside folder
-app.post('/gallery/folders/:slug/images/rename', authRole(['admin', 'mainadmin']), (req, res) => {
+// Rename image (Cloudinary rename + DB update)
+app.post('/gallery/folders/:slug/images/rename', authRole(['admin', 'mainadmin']), async (req, res) => {
   try {
+    await ensureGalleryTables();
     const { slug } = req.params;
-    const { filename, newName } = req.body || {};
-    if (!filename || !newName) return res.status(400).json({ error: 'filename and newName required' });
+    const { id, filename, newName } = req.body || {};
+    if (!newName) return res.status(400).json({ error: 'newName required' });
 
-    const folderPath = path.join(galleryDir, slug);
-    const src = path.join(folderPath, filename);
-    if (!fs.existsSync(src)) return res.status(404).json({ error: 'file not found' });
+    let row = null;
+    if (id) {
+      const { rows } = await pool.query('SELECT * FROM gallery_images WHERE id=$1 AND folder_slug=$2', [id, slug]);
+      if (!rows.length) return res.status(404).json({ error: 'image not found' });
+      row = rows[0];
+    } else if (filename) {
+      const { rows } = await pool.query('SELECT * FROM gallery_images WHERE filename=$1 AND folder_slug=$2', [filename, slug]);
+      if (!rows.length) return res.status(404).json({ error: 'image not found' });
+      row = rows[0];
+    } else return res.status(400).json({ error: 'id or filename required' });
 
-    const ext = path.extname(filename).toLowerCase();
-    const baseNew = slugify(String(newName).replace(path.extname(newName), ''));
-    const targetName = baseNew + ext;
-    const dest = path.join(folderPath, targetName);
-    if (fs.existsSync(dest)) return res.status(409).json({ error: 'target exists', filename: targetName });
+    // new public id
+    const base = path.basename(newName, path.extname(newName));
+    const safeBase = slugify(base) || 'img';
+    const newPublicId = `setapur/gallery/${slug}/${Date.now()}-${Math.round(Math.random()*1e9)}-${safeBase}`;
 
-    fs.renameSync(src, dest);
+    await cloudinary.uploader.rename(row.public_id, newPublicId, { resource_type: 'image' });
+    const newUrl = cloudinary.url(newPublicId, { secure: true });
 
-    const { meta } = getFolderMeta(slug);
-    meta.imageOrder = (meta.imageOrder || []).map(n => n === filename ? targetName : n);
-    if (meta.disabledImages && meta.disabledImages[filename]) {
-      delete meta.disabledImages[filename];
-      meta.disabledImages[targetName] = true;
-    }
-    if (meta.cover === filename) meta.cover = targetName;
-    if (meta.iconFile === filename) meta.iconFile = targetName;
-    saveFolderMeta(slug, meta);
+    const { rows: upd } = await pool.query(
+      'UPDATE gallery_images SET public_id=$1, url=$2, filename=$3 WHERE id=$4 RETURNING *',
+      [newPublicId, newUrl, `${safeBase}${path.extname(row.filename)}`, row.id]
+    );
 
-    const host = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
-    res.json({ ok: true, filename: targetName, url: `${host}/uploads/gallery/${slug}/${encodeURIComponent(targetName)}` });
+    res.json({ ok: true, filename: upd[0].filename, url: upd[0].url });
   } catch (e) {
     console.error('rename image error:', e);
     res.status(500).send('Failed to rename image');
   }
 });
 
-// Delete image inside folder
-app.delete('/gallery/folders/:slug/images', authRole(['admin', 'mainadmin']), (req, res) => {
+// Delete image
+app.delete('/gallery/folders/:slug/images', authRole(['admin', 'mainadmin']), async (req, res) => {
   try {
+    await ensureGalleryTables();
     const { slug } = req.params;
     const filename = req.query.filename || (req.body && req.body.filename);
-    if (!filename) return res.status(400).json({ error: 'filename required' });
+    const id = req.query.id || (req.body && req.body.id);
+    if (!filename && !id) return res.status(400).json({ error: 'id or filename required' });
 
-    const p = path.join(galleryDir, slug, filename);
-    if (!fs.existsSync(p)) return res.status(404).json({ error: 'file not found' });
-    fs.unlinkSync(p);
-
-    const { meta } = getFolderMeta(slug);
-    meta.imageOrder = (meta.imageOrder || []).filter(n => n !== filename);
-    if (meta.disabledImages) delete meta.disabledImages[filename];
-    if (meta.cover === filename) delete meta.cover;
-    if (meta.iconFile === filename) delete meta.iconFile;
-    saveFolderMeta(slug, meta);
-
-    res.json({ ok: true, filename });
-  } catch (e) {
-    console.error('ebooks delete file error:', e);
-    res.status(500).send('Failed to delete file');
-  }
-});
-
-// Root images reorder + aliases
-function rootReorderHandler(req, res) {
-  try {
-    const { filename, direction, newIndex } = req.body || {};
-    if (!filename) return res.status(400).json({ error: 'filename required' });
-    const meta = ensureRootOrderComplete();
-    meta.rootImageOrder = moveInArray(meta.rootImageOrder, String(filename), direction, typeof newIndex === 'number' ? newIndex : undefined);
-    meta.rootImageOrder = Array.from(new Set(meta.rootImageOrder));
-    saveRootMeta(meta);
-    res.json({ ok: true, rootImageOrder: meta.rootImageOrder });
-  } catch (e) {
-    console.error('reorder root images error:', e);
-    res.status(500).send('Failed to reorder root images');
-  }
-}
-app.post('/gallery/images/reorder', authRole(['admin', 'mainadmin']), rootReorderHandler);
-app.post('/gallery/home/images/reorder', authRole(['admin', 'mainadmin']), rootReorderHandler);
-
-// Root images enable/disable + aliases
-function rootEnableHandler(req, res) {
-  try {
-    const { filename } = req.body || {};
-    const enabledRaw = req.body.enabled;
-    const enabled = enabledRaw !== false && enabledRaw !== 'false' && enabledRaw !== 0 && enabledRaw !== '0';
-    if (!filename) return res.status(400).json({ error: 'filename required' });
-    const meta = loadRootMeta();
-    meta.disabledRootImages = meta.disabledRootImages || {};
-    if (enabled) delete meta.disabledRootImages[filename];
-    else meta.disabledRootImages[filename] = true;
-    saveRootMeta(meta);
-    res.json({ ok: true, filename, enabled });
-  } catch (e) {
-    console.error('enable root image error:', e);
-    res.status(500).send('Failed to update root image enabled');
-  }
-}
-app.post('/gallery/images/enable', authRole(['admin', 'mainadmin']), rootEnableHandler);
-app.post('/gallery/home/images/enable', authRole(['admin', 'mainadmin']), rootEnableHandler);
-
-// Root image rename + aliases
-function rootRenameHandler(req, res) {
-  try {
-    const { filename, newName } = req.body || {};
-    if (!filename || !newName) return res.status(400).json({ error: 'filename and newName required' });
-
-    const src = path.join(galleryDir, filename);
-    if (!fs.existsSync(src)) return res.status(404).json({ error: 'file not found' });
-    const ext = path.extname(filename).toLowerCase();
-    const baseNew = slugify(String(newName).replace(path.extname(newName), ''));
-    const targetName = baseNew + ext;
-    const dest = path.join(galleryDir, targetName);
-    if (fs.existsSync(dest)) return res.status(409).json({ error: 'target exists', filename: targetName });
-    fs.renameSync(src, dest);
-
-    const meta = loadRootMeta();
-    meta.rootImageOrder = (meta.rootImageOrder || []).map(n => n === filename ? targetName : n);
-    if (meta.disabledRootImages && meta.disabledRootImages[filename]) {
-      delete meta.disabledRootImages[filename];
-      meta.disabledRootImages[targetName] = true;
+    let row = null;
+    if (id) {
+      const { rows } = await pool.query('SELECT * FROM gallery_images WHERE id=$1 AND folder_slug=$2', [id, slug]);
+      if (!rows.length) return res.status(404).json({ error: 'image not found' });
+      row = rows[0];
+    } else {
+      const { rows } = await pool.query('SELECT * FROM gallery_images WHERE filename=$1 AND folder_slug=$2', [filename, slug]);
+      if (!rows.length) return res.status(404).json({ error: 'image not found' });
+      row = rows[0];
     }
-    saveRootMeta(meta);
 
-    const host = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
-    res.json({ ok: true, filename: targetName, url: `${host}/uploads/gallery/${encodeURIComponent(targetName)}` });
-  } catch (e) {
-    console.error('rename root image error:', e);
-    res.status(500).send('Failed to rename image');
-  }
-}
-app.post('/gallery/images/rename', authRole(['admin', 'mainadmin']), rootRenameHandler);
-app.post('/gallery/home/images/rename', authRole(['admin', 'mainadmin']), rootRenameHandler);
+    try { await cloudinary.uploader.destroy(row.public_id, { resource_type: 'image' }); } catch (e) { console.warn('cloud delete failed', e.message); }
+    await pool.query('DELETE FROM gallery_images WHERE id=$1', [row.id]);
 
-// Root image delete + aliases
-function rootDeleteHandler(req, res) {
-  try {
-    const filename = req.query.filename || (req.body && req.body.filename);
-    if (!filename) return res.status(400).json({ error: 'filename required' });
-    const p = path.join(galleryDir, filename);
-    if (!fs.existsSync(p)) return res.status(404).json({ error: 'file not found' });
-    fs.unlinkSync(p);
-    const meta = loadRootMeta();
-    meta.rootImageOrder = (meta.rootImageOrder || []).filter(n => n !== filename);
-    if (meta.disabledRootImages) delete meta.disabledRootImages[filename];
-    saveRootMeta(meta);
-    res.json({ ok: true, filename });
+    res.json({ ok: true, filename: row.filename });
   } catch (e) {
-    console.error('delete root image error:', e);
+    console.error('delete image error:', e);
     res.status(500).send('Failed to delete file');
   }
-}
-app.delete('/gallery/images', authRole(['admin', 'mainadmin']), rootDeleteHandler);
-app.delete('/gallery/home/images', authRole(['admin', 'mainadmin']), rootDeleteHandler);
-
-/* ===================== E-Books (PDF Library with enable/disable + rename/delete) ===================== */
-// Dir: /uploads/ebooks (legacy/local)
-const ebooksDir = path.join(uploadsDir, 'ebooks');
-if (!fs.existsSync(ebooksDir)) fs.mkdirSync(ebooksDir, { recursive: true });
-const PDF_EXT = new Set(['.pdf']);
-
-// Meta helpers
-const ebooksRootMetaPath = path.join(ebooksDir, '_meta.json');
-function loadEbooksRootMeta() {
-  const def = { fileOrder: [], disabledFiles: {} };
-  const meta = readJSONSafe(ebooksRootMetaPath, def);
-  meta.fileOrder = Array.isArray(meta.fileOrder) ? meta.fileOrder : [];
-  meta.disabledFiles = meta.disabledFiles && typeof meta.disabledFiles === 'object' ? meta.disabledFiles : {};
-  return meta;
-}
-function saveEbooksRootMeta(meta) { writeJSONSafe(ebooksRootMetaPath, meta || {}); }
-function ebookFolderMetaPath(slug) { return path.join(ebooksDir, slug, 'meta.json'); }
-function getEbookFolderMeta(slug) {
-  const p = ebookFolderMetaPath(slug);
-  const meta = readJSONSafe(p, {});
-  if (!('enabled' in meta)) meta.enabled = true;
-  if (!Array.isArray(meta.fileOrder)) meta.fileOrder = [];
-  if (!meta.disabledFiles || typeof meta.disabledFiles !== 'object') meta.disabledFiles = {};
-  return { meta, p };
-}
-function saveEbookFolderMeta(slug, meta) { writeJSONSafe(ebookFolderMetaPath(slug), meta); }
-
-// Multer storages (root + per folder) - legacy/local
-const ebookStorageRoot = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, ebooksDir),
-  filename: (req, file, cb) => {
-    const unique = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    cb(null, unique + (path.extname(file.originalname || '').toLowerCase() || '.pdf'));
-  },
 });
-const uploadEbooksRoot = multer({
-  storage: ebookStorageRoot,
-  fileFilter: (req, file, cb) => {
-    const ext = path.extname(file.originalname || '').toLowerCase();
-    if (ext === '.pdf') return cb(null, true);
-    cb(new Error('Only PDF files are allowed'));
-  },
-  limits: { fileSize: 100 * 1024 * 1024, files: 25 }, // 100MB per file
+
+// Set cover
+app.post('/gallery/folders/:slug/cover', authRole(['admin', 'mainadmin']), async (req, res) => {
+  try {
+    await ensureGalleryTables();
+    const { slug } = req.params;
+    const { filename, id } = req.body || {};
+    if (!filename && !id) return res.status(400).json({ error: 'id or filename required' });
+
+    const cond = id ? 'id=$1 AND folder_slug=$2' : 'filename=$1 AND folder_slug=$2';
+    const vals = id ? [id, slug] : [String(filename), slug];
+    const { rows } = await pool.query(`SELECT * FROM gallery_images WHERE ${cond}`, vals);
+    if (!rows.length) return res.status(404).json({ error: 'image not found' });
+
+    const img = rows[0];
+    await pool.query('UPDATE gallery_folders SET cover_public_id=$1, cover_url=$2 WHERE slug=$3', [img.public_id, img.url, slug]);
+    res.json({ ok: true, slug, cover: img.filename, coverUrl: img.url });
+  } catch (e) {
+    console.error('set cover error:', e);
+    res.status(500).send('Failed to set cover');
+  }
 });
-const ebookStoragePerFolder = multer.diskStorage({
-  destination: (req, file, cb) => {
-    try {
-      const slug = String(req.params.slug || '').trim();
-      if (!slug) return cb(new Error('slug required'));
-      const targetDir = path.join(ebooksDir, slug);
-      const safeRoot = path.resolve(ebooksDir);
-      const targetAbs = path.resolve(targetDir);
-      if (!targetAbs.startsWith(safeRoot)) return cb(new Error('Invalid slug'));
-      if (!fs.existsSync(targetAbs)) fs.mkdirSync(targetAbs, { recursive: true });
-      cb(null, targetAbs);
-    } catch (e) { cb(e); }
-  },
-  filename: (req, file, cb) => {
-    const unique = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    cb(null, unique + (path.extname(file.originalname || '').toLowerCase() || '.pdf'));
-  },
+
+// Set/Clear icon (built-in key or from image public_id)
+app.post('/gallery/folders/:slug/icon', authRole(['admin', 'mainadmin']), async (req, res) => {
+  try {
+    await ensureGalleryTables();
+    const { slug } = req.params;
+    const { filename, imageId, iconKey, clear } = req.body || {};
+
+    if (clear === true || clear === 'true' || clear === 1 || clear === '1') {
+      await pool.query('UPDATE gallery_folders SET icon_public_id=NULL, icon_key=NULL WHERE slug=$1', [slug]);
+      return res.json({ ok: true, slug, iconFile: null, iconKey: null, iconUrl: null });
+    }
+
+    if (iconKey && String(iconKey).trim()) {
+      const key = String(iconKey).trim();
+      if (!ALLOWED_ICON_KEYS.has(key)) return res.status(400).json({ error: 'Invalid iconKey', allowed: Array.from(ALLOWED_ICON_KEYS) });
+      await pool.query('UPDATE gallery_folders SET icon_public_id=NULL, icon_key=$1 WHERE slug=$2', [key, slug]);
+      return res.json({ ok: true, slug, iconFile: null, iconKey: key, iconUrl: null });
+    }
+
+    // use existing image as icon
+    let row = null;
+    if (imageId) {
+      const { rows } = await pool.query('SELECT * FROM gallery_images WHERE id=$1 AND folder_slug=$2', [imageId, slug]);
+      if (!rows.length) return res.status(404).json({ error: 'image not found' });
+      row = rows[0];
+    } else if (filename) {
+      const { rows } = await pool.query('SELECT * FROM gallery_images WHERE filename=$1 AND folder_slug=$2', [filename, slug]);
+      if (!rows.length) return res.status(404).json({ error: 'image not found' });
+      row = rows[0];
+    } else return res.status(400).json({ error: 'Provide imageId OR filename OR iconKey OR clear=true' });
+
+    await pool.query('UPDATE gallery_folders SET icon_public_id=$1, icon_key=NULL WHERE slug=$2', [row.public_id, slug]);
+    return res.json({ ok: true, slug, iconFile: row.filename, iconKey: null, iconUrl: row.url });
+  } catch (e) {
+    console.error('set icon error:', e);
+    res.status(500).send('Failed to set icon');
+  }
 });
-const uploadEbooksFolder = multer({
-  storage: ebookStoragePerFolder,
-  fileFilter: (req, file, cb) => {
-    const ext = path.extname(file.originalname || '').toLowerCase();
-    if (ext === '.pdf') return cb(null, true);
-    cb(new Error('Only PDF files are allowed'));
-  },
+
+/* ===================== E-Books (Cloudinary raw + Postgres) ===================== */
+const uploadEbooksCloud = new multer({
+  storage: new CloudinaryStorage({
+    cloudinary,
+    params: async (req, file) => {
+      const slug = req.params.slug ? String(req.params.slug).trim() : null;
+      const folder = slug ? `setapur/ebooks/${slug}` : 'setapur/ebooks';
+      const base = path.basename(file.originalname || 'file', path.extname(file.originalname || ''));
+      const safeBase = slugify(base) || 'file';
+      return {
+        folder,
+        public_id: `${Date.now()}-${Math.round(Math.random()*1e9)}-${safeBase}`,
+        resource_type: 'raw',
+        allowed_formats: ['pdf']
+      };
+    },
+  }),
   limits: { fileSize: 100 * 1024 * 1024, files: 25 },
 });
 
-// List folders (users/admin; users only enabled)
-app.get('/ebooks/folders', authRole(['user','admin','mainadmin']), (req, res) => {
+app.get('/ebooks/folders', authRole(['user','admin','mainadmin']), async (req, res) => {
   try {
+    await ensureEbooksTables();
     const role = req.user?.role || 'user';
     const isAdmin = role === 'admin' || role === 'mainadmin';
-    const includeDisabledQ = String(req.query.includeDisabled || '').toLowerCase();
-    const showDisabled = isAdmin || includeDisabledQ === '1' || includeDisabledQ === 'true';
-
-    const host = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
-    const entries = fs.readdirSync(ebooksDir, { withFileTypes: true });
-    let folders = [];
-    for (const ent of entries) {
-      if (!ent.isDirectory()) continue;
-      const slug = ent.name;
-      const folderPath = path.join(ebooksDir, slug);
-      const { meta } = getEbookFolderMeta(slug);
-      let count = 0;
-      try {
-        count = fs.readdirSync(folderPath, { withFileTypes: true })
-          .filter(f => f.isFile() && PDF_EXT.has(path.extname(f.name).toLowerCase())).length;
-      } catch (_) {}
-      folders.push({
-        name: meta.name || slug.replace(/-/g, ' '),
-        slug,
-        url: `${host}/uploads/ebooks/${slug}/`,
-        fileCount: count,
-        enabled: meta.enabled !== false,
+    const includeDisabled = ['1','true'].includes(String(req.query.includeDisabled || '').toLowerCase());
+    let sql = 'SELECT slug, name, enabled FROM ebook_folders';
+    if (!isAdmin && !includeDisabled) sql += ' WHERE enabled = true';
+    sql += ' ORDER BY lower(name) ASC';
+    const { rows } = await pool.query(sql);
+    // compute file counts
+    const out = [];
+    for (const f of rows) {
+      const { rows: cnt } = await pool.query('SELECT COUNT(*)::int AS c FROM ebook_files WHERE folder_slug=$1', [f.slug]);
+      out.push({
+        name: f.name,
+        slug: f.slug,
+        url: null,
+        fileCount: cnt[0].c,
+        enabled: f.enabled !== false
       });
     }
-    if (!showDisabled) folders = folders.filter(f => f.enabled !== false);
-    folders.sort((a,b)=>String(a.name).toLowerCase().localeCompare(String(b.name).toLowerCase()));
-    res.json(folders);
+    res.json(out);
   } catch (e) {
     console.error('ebooks folders error:', e);
     res.status(500).send('Failed to list e-book folders');
   }
 });
 
-// List root PDFs (users/admin; users only enabled)
-app.get('/ebooks/files', authRole(['user','admin','mainadmin']), (req, res) => {
+app.get('/ebooks/files', authRole(['user','admin','mainadmin']), async (req, res) => {
   try {
+    await ensureEbooksTables();
     const role = req.user?.role || 'user';
     const isAdmin = role === 'admin' || role === 'mainadmin';
-    const includeDisabledQ = String(req.query.includeDisabled || '').toLowerCase();
-    const showDisabled = isAdmin || includeDisabledQ === '1' || includeDisabledQ === 'true';
-
-    const host = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
-    const meta = loadEbooksRootMeta();
-    const entries = fs.readdirSync(ebooksDir, { withFileTypes: true });
-    let files = entries
-      .filter(ent => ent.isFile())
-      .map(ent => ent.name)
-      .filter(name => PDF_EXT.has(path.extname(name).toLowerCase()))
-      .map(fn => {
-        const st = fs.statSync(path.join(ebooksDir, fn));
-        return {
-          name: fn,
-          url: `${host}/uploads/ebooks/${encodeURIComponent(fn)}`,
-          size: st.size,
-          modifiedAt: new Date(st.mtimeMs).toISOString(),
-          enabled: !(meta.disabledFiles && meta.disabledFiles[fn] === true),
-          order: (meta.fileOrder || []).indexOf(fn),
-        };
-      });
-    files.sort((a,b) => (a.order - b.order) || String(a.name).localeCompare(String(b.name)));
-    if (!showDisabled) files = files.filter(x => x.enabled !== false);
-    res.json(files);
+    const includeDisabled = ['1','true'].includes(String(req.query.includeDisabled || '').toLowerCase());
+    let sql = 'SELECT id, filename, url, enabled, order_index, uploaded_at FROM ebook_files WHERE folder_slug IS NULL';
+    if (!isAdmin && !includeDisabled) sql += ' AND enabled = true';
+    sql += ' ORDER BY order_index ASC, lower(filename) ASC';
+    const { rows } = await pool.query(sql);
+    res.json(rows);
   } catch (e) {
     console.error('ebooks root files error:', e);
     res.status(500).send('Failed to list e-books');
   }
 });
 
-// List PDFs inside a folder (users/admin; users only enabled)
-app.get('/ebooks/folders/:slug/files', authRole(['user','admin','mainadmin']), (req, res) => {
+app.get('/ebooks/folders/:slug/files', authRole(['user','admin','mainadmin']), async (req, res) => {
   try {
+    await ensureEbooksTables();
     const { slug } = req.params;
-    if (!slug) return res.status(400).json({ error: 'slug required' });
-    const dir = path.join(ebooksDir, slug);
-    if (!fs.existsSync(dir)) return res.status(404).json({ error: 'folder not found' });
-
     const role = req.user?.role || 'user';
     const isAdmin = role === 'admin' || role === 'mainadmin';
-    const includeDisabledQ = String(req.query.includeDisabled || '').toLowerCase();
-    const showDisabled = isAdmin || includeDisabledQ === '1' || includeDisabledQ === 'true';
+    const includeDisabled = ['1','true'].includes(String(req.query.includeDisabled || '').toLowerCase());
 
-    const host = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
-    const { meta } = getEbookFolderMeta(slug);
-
-    let files = fs.readdirSync(dir, { withFileTypes: true })
-      .filter(ent => ent.isFile())
-      .map(ent => ent.name)
-      .filter(name => PDF_EXT.has(path.extname(name).toLowerCase()))
-      .map(fn => {
-        const st = fs.statSync(path.join(dir, fn));
-        return {
-          name: fn,
-          url: `${host}/uploads/ebooks/${encodeURIComponent(slug)}/${encodeURIComponent(fn)}`,
-          size: st.size,
-          modifiedAt: new Date(st.mtimeMs).toISOString(),
-          enabled: !(meta.disabledFiles && meta.disabledFiles[fn] === true),
-        };
-      });
-
-    // order apply
-    const idxMap = new Map((meta.fileOrder || []).map((n,i)=>[n,i]));
-    files.sort((a,b)=> (idxMap.get(a.name)??1e9) - (idxMap.get(b.name)??1e9) || String(a.name).localeCompare(String(b.name)));
-    if (!showDisabled) files = files.filter(x => x.enabled !== false);
-
-    res.json(files);
+    let sql = 'SELECT id, filename, url, enabled, order_index, uploaded_at FROM ebook_files WHERE folder_slug=$1';
+    const vals=[slug];
+    if (!isAdmin && !includeDisabled) sql += ' AND enabled = true';
+    sql += ' ORDER BY order_index ASC, lower(filename) ASC';
+    const { rows } = await pool.query(sql, vals);
+    res.json(rows);
   } catch (e) {
     console.error('ebooks folder files error:', e);
     res.status(500).send('Failed to list e-books in folder');
   }
 });
 
-// Admin: create folder
-app.post('/ebooks/folders/create', authRole(['admin','mainadmin']), (req, res) => {
+app.post('/ebooks/folders/create', authRole(['admin','mainadmin']), async (req, res) => {
   try {
+    await ensureEbooksTables();
     const { name } = req.body || {};
     if (!name || !String(name).trim()) return res.status(400).json({ error: 'name is required' });
     const slug = slugify(String(name));
-    if (!slug) return res.status(400).json({ error: 'invalid name' });
-    const dir = path.join(ebooksDir, slug);
-    if (fs.existsSync(dir)) return res.status(409).json({ error: 'folder already exists', slug });
-    fs.mkdirSync(dir, { recursive: true });
-    saveEbookFolderMeta(slug, { name: String(name).trim(), enabled: true, fileOrder: [], disabledFiles: {} });
-    const host = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
-    res.status(201).json({ name: String(name).trim(), slug, url: `${host}/uploads/ebooks/${slug}/` });
+    await pool.query('INSERT INTO ebook_folders (slug, name, enabled) VALUES ($1,$2,true)', [slug, String(name).trim()]);
+    res.status(201).json({ name: String(name).trim(), slug });
   } catch (e) {
+    if (String(e.message || '').toLowerCase().includes('duplicate')) return res.status(409).json({ error: 'folder already exists' });
     console.error('ebooks create folder error:', e);
     res.status(500).send('Failed to create folder');
   }
 });
 
-// Admin: rename folder (updates meta name)
-app.post('/ebooks/folders/:slug/rename', authRole(['admin','mainadmin']), (req, res) => {
+app.post('/ebooks/folders/:slug/rename', authRole(['admin','mainadmin']), async (req, res) => {
   try {
+    await ensureEbooksTables();
     const { slug } = req.params;
     const { name, newName } = req.body || {};
     const desired = String((name || newName || '')).trim();
     if (!desired) return res.status(400).json({ error: 'name (or newName) required' });
     const newSlug = slugify(desired);
-    const src = path.join(ebooksDir, slug);
-    const dest = path.join(ebooksDir, newSlug);
-    if (!fs.existsSync(src)) return res.status(404).json({ error: 'folder not found' });
-    if (fs.existsSync(dest)) return res.status(409).json({ error: 'target exists', slug: newSlug });
-    fs.renameSync(src, dest);
-    const { meta } = getEbookFolderMeta(newSlug);
-    meta.name = desired;
-    saveEbookFolderMeta(newSlug, meta);
-    const host = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
-    res.json({ ok: true, slug: newSlug, name: meta.name, url: `${host}/uploads/ebooks/${newSlug}/` });
+
+    const { rows: exists } = await pool.query('SELECT 1 FROM ebook_folders WHERE slug=$1', [slug]);
+    if (!exists.length) return res.status(404).json({ error: 'folder not found' });
+    const { rows: dup } = await pool.query('SELECT 1 FROM ebook_folders WHERE slug=$1', [newSlug]);
+    if (dup.length && newSlug !== slug) return res.status(409).json({ error: 'target exists', slug: newSlug });
+
+    await pool.query('BEGIN');
+    await pool.query('UPDATE ebook_files SET folder_slug=$1 WHERE folder_slug=$2', [newSlug, slug]);
+    await pool.query('UPDATE ebook_folders SET slug=$1, name=$2 WHERE slug=$3', [newSlug, desired, slug]);
+    await pool.query('COMMIT');
+
+    res.json({ ok: true, slug: newSlug, name: desired });
   } catch (e) {
+    await pool.query('ROLLBACK').catch(()=>{});
     console.error('ebooks rename folder error:', e);
     res.status(500).send('Failed to rename folder');
   }
 });
 
-// Admin: enable/disable folder
-app.post('/ebooks/folders/:slug/enable', authRole(['admin','mainadmin']), (req, res) => {
+app.post('/ebooks/folders/:slug/enable', authRole(['admin','mainadmin']), async (req, res) => {
   try {
+    await ensureEbooksTables();
     const { slug } = req.params;
     const enabledRaw = req.body.enabled;
     const enabled = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
-    const { meta } = getEbookFolderMeta(slug);
-    meta.enabled = enabled;
-    saveEbookFolderMeta(slug, meta);
-    res.json({ ok: true, slug, enabled });
+    const { rows } = await pool.query('UPDATE ebook_folders SET enabled=$1 WHERE slug=$2 RETURNING *', [enabled, slug]);
+    if (!rows.length) return res.status(404).json({ error: 'folder not found' });
+    res.json({ ok: true, slug, enabled: rows[0].enabled });
   } catch (e) {
     console.error('ebooks enable folder error:', e);
     res.status(500).send('Failed to update folder enabled');
   }
 });
 
-// Admin: delete folder
-app.delete('/ebooks/folders/:slug', authRole(['admin','mainadmin']), (req, res) => {
+app.delete('/ebooks/folders/:slug', authRole(['admin','mainadmin']), async (req, res) => {
   try {
+    await ensureEbooksTables();
     const { slug } = req.params;
-    const dir = path.join(ebooksDir, slug);
-    if (!fs.existsSync(dir)) return res.status(404).json({ error: 'folder not found' });
-    fs.rmSync(dir, { recursive: true, force: true });
+
+    // Optionally delete Cloudinary assets in folder
+    try {
+      const prefix = `setapur/ebooks/${slug}`;
+      const { resources } = await cloudinary.search.expression(`folder:${prefix}`).max_results(500).execute();
+      for (const r of (resources || [])) {
+        await cloudinary.uploader.destroy(r.public_id, { resource_type: 'raw' });
+      }
+    } catch (e) { console.warn('Cloudinary ebooks folder cleanup failed (non-fatal):', e.message); }
+
+    const { rowCount } = await pool.query('DELETE FROM ebook_folders WHERE slug=$1', [slug]);
+    if (!rowCount) return res.status(404).json({ error: 'folder not found' });
     res.json({ ok: true, slug });
   } catch (e) {
     console.error('ebooks delete folder error:', e);
@@ -2123,255 +1749,288 @@ app.delete('/ebooks/folders/:slug', authRole(['admin','mainadmin']), (req, res) 
   }
 });
 
-// Admin: upload PDFs to root (updates order)
-app.post('/ebooks/upload', authRole(['admin','mainadmin']), uploadEbooksRoot.array('files', 25), (req, res) => {
+app.post('/ebooks/upload', authRole(['admin','mainadmin']), uploadEbooksCloud.array('files', 25), async (req, res) => {
   try {
+    await ensureEbooksTables();
     const files = req.files || [];
     if (!files.length) return res.status(400).json({ error: 'No files uploaded' });
+    const { rows: r0 } = await pool.query('SELECT COALESCE(MAX(order_index), -1) AS m FROM ebook_files WHERE folder_slug IS NULL');
+    let order = Number(r0[0]?.m || -1) + 1;
 
-    const host = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
-    const meta = loadEbooksRootMeta();
-    for (const f of files) if (!meta.fileOrder.includes(f.filename)) meta.fileOrder.push(f.filename);
-    saveEbooksRootMeta(meta);
-
-    const out = files.map(f => ({ name: f.filename, size: f.size, url: `${host}/uploads/ebooks/${encodeURIComponent(f.filename)}` }));
-    res.status(201).json({ uploaded: out, count: out.length });
-  } catch (e) {
-    console.error('ebooks root upload error:', e);
-    res.status(500).send('Upload failed');
-  }
-});
-
-// Admin: upload PDFs to a folder (updates order)
-app.post('/ebooks/folders/:slug/upload', authRole(['admin','mainadmin']), uploadEbooksFolder.array('files', 25), (req, res) => {
-  try {
-    const { slug } = req.params;
-    const files = req.files || [];
-    if (!files.length) return res.status(400).json({ error: 'No files uploaded' });
-
-    const host = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
-    const { meta } = getEbookFolderMeta(slug);
-    meta.fileOrder = Array.isArray(meta.fileOrder) ? meta.fileOrder : [];
-    for (const f of files) if (!meta.fileOrder.includes(f.filename)) meta.fileOrder.push(f.filename);
-    saveEbookFolderMeta(slug, meta);
-
-    const out = files.map(f => ({ name: f.filename, size: f.size, url: `${host}/uploads/ebooks/${encodeURIComponent(slug)}/${encodeURIComponent(f.filename)}` }));
-    res.status(201).json({ uploaded: out, count: out.length, folder: slug });
-  } catch (e) {
-    console.error('ebooks folder upload error:', e);
-    res.status(500).send('Upload failed');
-  }
-});
-
-// Admin: root file rename
-app.post('/ebooks/files/rename', authRole(['admin','mainadmin']), (req, res) => {
-  try {
-    const { filename, newName } = req.body || {};
-    if (!filename || !newName) return res.status(400).json({ error: 'filename and newName required' });
-    const src = path.join(ebooksDir, filename);
-    if (!fs.existsSync(src)) return res.status(404).json({ error: 'file not found' });
-    const ext = path.extname(filename).toLowerCase();
-    const baseNew = slugify(String(newName).replace(path.extname(newName), ''));
-    const targetName = baseNew + ext;
-    const dest = path.join(ebooksDir, targetName);
-    if (fs.existsSync(dest)) return res.status(409).json({ error: 'target exists', filename: targetName });
-    fs.renameSync(src, dest);
-    const meta = loadEbooksRootMeta();
-    meta.fileOrder = (meta.fileOrder || []).map(n => n === filename ? targetName : n);
-    if (meta.disabledFiles && meta.disabledFiles[filename]) {
-      delete meta.disabledFiles[filename];
-      meta.disabledFiles[targetName] = true;
+    const inserted = [];
+    for (const f of files) {
+      const filename = path.basename(f.originalname || 'file').replace(/\s+/g,'-');
+      const { rows } = await pool.query(
+        `INSERT INTO ebook_files (folder_slug, public_id, url, filename, enabled, order_index)
+         VALUES (NULL,$1,$2,$3,true,$4) RETURNING *`,
+        [f.filename, f.path, filename, order++]
+      );
+      inserted.push(rows[0]);
     }
-    saveEbooksRootMeta(meta);
-    const host = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
-    res.json({ ok: true, filename: targetName, url: `${host}/uploads/ebooks/${encodeURIComponent(targetName)}` });
+    res.status(201).json({ uploaded: inserted.map(r => ({ id:r.id, filename:r.filename, url:r.url })), count: inserted.length });
+  } catch (e){ console.error('ebooks root upload error:', e); res.status(500).send('Upload failed'); }
+});
+
+app.post('/ebooks/folders/:slug/upload', authRole(['admin','mainadmin']), uploadEbooksCloud.array('files', 25), async (req, res) => {
+  try {
+    await ensureEbooksTables();
+    const { slug } = req.params;
+    await pool.query(`INSERT INTO ebook_folders (slug,name,enabled) VALUES ($1,$1,true) ON CONFLICT (slug) DO NOTHING`, [slug]);
+    const files = req.files || [];
+    if (!files.length) return res.status(400).json({ error: 'No files uploaded' });
+
+    const { rows: r0 } = await pool.query('SELECT COALESCE(MAX(order_index), -1) AS m FROM ebook_files WHERE folder_slug=$1',[slug]);
+    let order = Number(r0[0]?.m || -1) + 1;
+
+    const inserted=[];
+    for (const f of files) {
+      const filename = path.basename(f.originalname || 'file').replace(/\s+/g,'-');
+      const { rows } = await pool.query(
+        `INSERT INTO ebook_files (folder_slug, public_id, url, filename, enabled, order_index)
+         VALUES ($1,$2,$3,$4,true,$5) RETURNING *`,
+        [slug, f.filename, f.path, filename, order++]
+      );
+      inserted.push(rows[0]);
+    }
+    res.status(201).json({ uploaded: inserted.map(r => ({ id:r.id, filename:r.filename, url:r.url })), count: inserted.length, folder: slug });
+  } catch (e){ console.error('ebooks folder upload error:', e); res.status(500).send('Upload failed'); }
+});
+
+app.post('/ebooks/files/rename', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureEbooksTables();
+    const { id, filename, folderSlug, newName } = req.body || {};
+    if (!newName) return res.status(400).json({ error: 'newName required' });
+
+    let row = null;
+    if (id) {
+      const { rows } = await pool.query('SELECT * FROM ebook_files WHERE id=$1', [id]);
+      if (!rows.length) return res.status(404).json({ error: 'file not found' });
+      row = rows[0];
+    } else if (filename) {
+      const cond = folderSlug ? 'filename=$1 AND folder_slug=$2' : 'filename=$1 AND folder_slug IS NULL';
+      const vals = folderSlug ? [filename, folderSlug] : [filename];
+      const { rows } = await pool.query(`SELECT * FROM ebook_files WHERE ${cond}`, vals);
+      if (!rows.length) return res.status(404).json({ error: 'file not found' });
+      row = rows[0];
+    } else return res.status(400).json({ error: 'id or filename required' });
+
+    const base = path.basename(newName, path.extname(newName));
+    const safeBase = slugify(base) || 'file';
+    const newPublicId = (row.folder_slug ? `setapur/ebooks/${row.folder_slug}/` : 'setapur/ebooks/') + `${Date.now()}-${Math.round(Math.random()*1e9)}-${safeBase}`;
+
+    await cloudinary.uploader.rename(row.public_id, newPublicId, { resource_type: 'raw' });
+    const newUrl = cloudinary.url(newPublicId, { resource_type: 'raw', secure: true });
+
+    const { rows: upd } = await pool.query(
+      'UPDATE ebook_files SET public_id=$1, url=$2, filename=$3 WHERE id=$4 RETURNING *',
+      [newPublicId, newUrl, `${safeBase}${path.extname(row.filename)}`, row.id]
+    );
+    res.json({ ok: true, filename: upd[0].filename, url: upd[0].url });
   } catch (e) {
     console.error('ebooks root rename error:', e);
     res.status(500).send('Failed to rename file');
   }
 });
 
-// Admin: root file enable/disable
-app.post('/ebooks/files/enable', authRole(['admin','mainadmin']), (req, res) => {
+app.post('/ebooks/files/enable', authRole(['admin','mainadmin']), async (req, res) => {
   try {
-    const { filename } = req.body || {};
+    await ensureEbooksTables();
+    const { id, filename, folderSlug } = req.body || {};
     const enabledRaw = req.body.enabled;
     const enabled = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
-    if (!filename) return res.status(400).json({ error: 'filename required' });
-    const meta = loadEbooksRootMeta();
-    meta.disabledFiles = meta.disabledFiles || {};
-    if (enabled) delete meta.disabledFiles[filename];
-    else meta.disabledFiles[filename] = true;
-    saveEbooksRootMeta(meta);
-    res.json({ ok: true, filename, enabled });
+    let row = null;
+
+    if (id) {
+      const { rows } = await pool.query('UPDATE ebook_files SET enabled=$1 WHERE id=$2 RETURNING *', [enabled, id]);
+      if (!rows.length) return res.status(404).json({ error: 'file not found' });
+      row = rows[0];
+    } else if (filename) {
+      const cond = folderSlug ? 'filename=$1 AND folder_slug=$2' : 'filename=$1 AND folder_slug IS NULL';
+      const vals = folderSlug ? [filename, folderSlug] : [filename];
+      const { rows } = await pool.query(`UPDATE ebook_files SET enabled=$3 WHERE ${cond} RETURNING *`, [...vals, enabled]);
+      if (!rows.length) return res.status(404).json({ error: 'file not found' });
+      row = rows[0];
+    } else return res.status(400).json({ error: 'id or filename required' });
+
+    res.json({ ok: true, filename: row.filename, enabled: row.enabled });
   } catch (e) {
     console.error('ebooks root enable error:', e);
     res.status(500).send('Failed to update file enabled');
   }
 });
 
-// Admin: root file delete
-app.delete('/ebooks/files', authRole(['admin','mainadmin']), (req, res) => {
+app.delete('/ebooks/files', authRole(['admin','mainadmin']), async (req, res) => {
   try {
+    await ensureEbooksTables();
+    const id = req.query.id || (req.body && req.body.id);
     const filename = req.query.filename || (req.body && req.body.filename);
-    if (!filename) return res.status(400).json({ error: 'filename required' });
-    const p = path.join(ebooksDir, filename);
-    if (!fs.existsSync(p)) return res.status(404).json({ error: 'file not found' });
-    fs.unlinkSync(p);
-    const meta = loadEbooksRootMeta();
-    meta.fileOrder = (meta.fileOrder || []).filter(n => n !== filename);
-    if (meta.disabledFiles) delete meta.disabledFiles[filename];
-    saveEbooksRootMeta(meta);
-    res.json({ ok: true, filename });
+    const folderSlug = req.query.folderSlug || (req.body && req.body.folderSlug);
+
+    let row = null;
+    if (id) {
+      const { rows } = await pool.query('SELECT * FROM ebook_files WHERE id=$1', [id]);
+      if (!rows.length) return res.status(404).json({ error: 'file not found' });
+      row = rows[0];
+    } else if (filename) {
+      const cond = folderSlug ? 'filename=$1 AND folder_slug=$2' : 'filename=$1 AND folder_slug IS NULL';
+      const vals = folderSlug ? [filename, folderSlug] : [filename];
+      const { rows } = await pool.query(`SELECT * FROM ebook_files WHERE ${cond}`, vals);
+      if (!rows.length) return res.status(404).json({ error: 'file not found' });
+      row = rows[0];
+    } else return res.status(400).json({ error: 'id or filename required' });
+
+    try { await cloudinary.uploader.destroy(row.public_id, { resource_type: 'raw' }); } catch (e) { console.warn('cloud delete failed', e.message); }
+    await pool.query('DELETE FROM ebook_files WHERE id=$1', [row.id]);
+
+    res.json({ ok: true, filename: row.filename });
   } catch (e) {
     console.error('ebooks root delete error:', e);
     res.status(500).send('Failed to delete file');
   }
 });
 
-// Admin: folder file rename
-app.post('/ebooks/folders/:slug/files/rename', authRole(['admin','mainadmin']), (req, res) => {
-  try {
-    const { slug } = req.params;
-    const { filename, newName } = req.body || {};
-    if (!filename || !newName) return res.status(400).json({ error: 'filename and newName required' });
-
-    const folderPath = path.join(ebooksDir, slug);
-    const src = path.join(folderPath, filename);
-    if (!fs.existsSync(src)) return res.status(404).json({ error: 'file not found' });
-
-    const ext = path.extname(filename).toLowerCase();
-    const baseNew = slugify(String(newName).replace(path.extname(newName), ''));
-    const targetName = baseNew + ext;
-    const dest = path.join(folderPath, targetName);
-    if (fs.existsSync(dest)) return res.status(409).json({ error: 'target exists', filename: targetName });
-
-    fs.renameSync(src, dest);
-
-    const { meta } = getEbookFolderMeta(slug);
-    meta.fileOrder = (meta.fileOrder || []).map(n => n === filename ? targetName : n);
-    if (meta.disabledFiles && meta.disabledFiles[filename]) {
-      delete meta.disabledFiles[filename];
-      meta.disabledFiles[targetName] = true;
-    }
-    saveEbookFolderMeta(slug, meta);
-
-    const host = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
-    res.json({ ok: true, filename: targetName, url: `${host}/uploads/ebooks/${slug}/${encodeURIComponent(targetName)}` });
-  } catch (e) {
-    console.error('ebooks rename file error:', e);
-    res.status(500).send('Failed to rename file');
+// Reorder ebook files
+async function reorderEbookFiles(folderSlug, targetIdOrName, direction, newIndex) {
+  const cond = folderSlug ? 'folder_slug=$1' : 'folder_slug IS NULL';
+  const vals = folderSlug ? [folderSlug] : [];
+  const { rows } = await pool.query(`SELECT id, filename FROM ebook_files WHERE ${cond} ORDER BY order_index ASC, lower(filename) ASC`, vals);
+  let list = rows.map(r => ({ id: r.id, name: r.filename }));
+  let idx = list.findIndex(x => String(x.id) === String(targetIdOrName) || String(x.name) === String(targetIdOrName));
+  if (idx === -1) return;
+  if (typeof newIndex === 'number' && Number.isFinite(newIndex)) {
+    const item = list.splice(idx,1)[0];
+    list.splice(Math.max(0, Math.min(newIndex, list.length)), 0, item);
+  } else if (direction === 'up' && idx > 0) {
+    [list[idx-1], list[idx]] = [list[idx], list[idx-1]];
+  } else if (direction === 'down' && idx >= 0 && idx < list.length - 1) {
+    [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
   }
-});
-
-// Admin: folder file enable/disable
-app.post('/ebooks/folders/:slug/files/enable', authRole(['admin','mainadmin']), (req, res) => {
-  try {
-    const { slug } = req.params;
-    const { filename } = req.body || {};
-    const enabledRaw = req.body.enabled;
-    const enabled = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
-    if (!filename) return res.status(400).json({ error: 'filename required' });
-
-    const { meta } = getEbookFolderMeta(slug);
-    meta.disabledFiles = meta.disabledFiles || {};
-    if (enabled) delete meta.disabledFiles[filename];
-    else meta.disabledFiles[filename] = true;
-    saveEbookFolderMeta(slug, meta);
-    res.json({ ok: true, filename, enabled });
-  } catch (e) {
-    console.error('ebooks enable file error:', e);
-    res.status(500).send('Failed to update file enabled');
+  for (let i=0;i<list.length;i++) {
+    await pool.query('UPDATE ebook_files SET order_index=$1 WHERE id=$2', [i, list[i].id]);
   }
-});
-
-// Admin: folder file delete
-app.delete('/ebooks/folders/:slug/files', authRole(['admin','mainadmin']), (req, res) => {
-  try {
-    const { slug } = req.params;
-    const filename = req.query.filename || (req.body && req.body.filename);
-    if (!filename) return res.status(400).json({ error: 'filename required' });
-
-    const p = path.join(ebooksDir, slug, filename);
-    if (!fs.existsSync(p)) return res.status(404).json({ error: 'file not found' });
-    fs.unlinkSync(p);
-
-    const { meta } = getEbookFolderMeta(slug);
-    meta.fileOrder = (meta.fileOrder || []).filter(n => n !== filename);
-    if (meta.disabledFiles) delete meta.disabledFiles[filename];
-    saveEbookFolderMeta(slug, meta);
-
-    res.json({ ok: true, filename });
-  } catch (e) {
-    console.error('ebooks delete file error:', e);
-    res.status(500).send('Failed to delete file');
-  }
-});
-
-/* ===================== Mount analytics admin (fix 404) BEFORE general /analytics ===================== */
-app.use('/analytics/admin', authRole(['admin','mainadmin']), analyticsAdminRoutes);
-
-/* ===================== Totals (fallback) ===================== */
-if (analyticsRoutes) app.use('/analytics', authRole(['user','admin','mainadmin']), analyticsRoutes);
-if (totalsRoutes) {
-  app.use('/totals', authRole(['user','admin','mainadmin']), totalsRoutes);
-} else {
-  app.get('/totals', authRole(['user','admin','mainadmin']), (req, res) => {
-    try {
-      const approvedDonations = (donations || []).filter(isApproved);
-      const totalDonation = approvedDonations.reduce((sum, d) => sum + Number(d.amount || 0), 0);
-      const approvedEnabledExpenses = (Array.isArray(expenses) ? expenses : []).filter(e => e && e.approved === true && e.enabled !== false);
-      const totalExpense = approvedEnabledExpenses.reduce((sum, e) => sum + Number(e.amount || 0), 0);
-      const balance = totalDonation - totalExpense;
-      res.json({ totalDonation, totalExpense, balance });
-    } catch (e) {
-      console.error('totals error:', e);
-      res.status(500).send('Totals failed');
-    }
-  });
 }
 
-/* ===================== Mount existing routers ===================== */
-app.use('/admin', authRole(['admin','mainadmin']), adminRoutes);
-app.use('/api', categoryRoutes);
+app.post('/ebooks/files/reorder', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureEbooksTables();
+    const { id, filename, folderSlug, direction, newIndex } = req.body || {};
+    const target = id || filename;
+    if (!target) return res.status(400).json({ error: 'id or filename required' });
+    await reorderEbookFiles(folderSlug || null, target, direction, typeof newIndex === 'number' ? newIndex : undefined);
+
+    const cond = folderSlug ? 'folder_slug=$1' : 'folder_slug IS NULL';
+    const vals = folderSlug ? [folderSlug] : [];
+    const { rows } = await pool.query(`SELECT filename FROM ebook_files WHERE ${cond} ORDER BY order_index ASC, lower(filename) ASC`, vals);
+    res.json({ ok: true, order: rows.map(r => r.filename) });
+  } catch (e) {
+    console.error('ebooks reorder error:', e);
+    res.status(500).send('Failed to reorder');
+  }
+});
+
+/* ===================== Analytics + Totals (DB-based) ===================== */
+app.get('/totals', authRole(['user','admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureDonationsTable(); await ensureExpensesTable();
+    const { rows: d } = await pool.query('SELECT COALESCE(SUM(amount),0) AS total FROM donations WHERE approved = true');
+    const { rows: e } = await pool.query('SELECT COALESCE(SUM(amount),0) AS total FROM expenses WHERE approved = true AND enabled = true');
+    const totalDonation = Number(d[0].total || 0);
+    const totalExpense = Number(e[0].total || 0);
+    res.json({ totalDonation, totalExpense, balance: totalDonation - totalExpense });
+  } catch (err) { console.error(err); res.status(500).send('Totals failed'); }
+});
+
+app.get('/analytics/summary', authRole(['user','admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureDonationsTable(); await ensureExpensesTable();
+    // Optional folders config (from file or admin UI you have)
+    let folders = readFolders(); if (!Array.isArray(folders)) folders = [];
+    if (!folders.length) {
+      folders = [{
+        id: 'default-1',
+        name: 'shri krishna janmastami',
+        events: [
+          { id: 'evt-1', name: 'shri krishna janmastami 2025', enabled: true, showDonationDetail: true, showExpenseDetail: true },
+          { id: 'evt-2', name: 'shri krishna chhathi 2025', enabled: true, showDonationDetail: true, showExpenseDetail: true },
+        ],
+      }];
+    }
+
+    const { rows: dsum } = await pool.query(`SELECT lower(category) AS cat, COALESCE(SUM(amount),0)::float AS total FROM donations WHERE approved=true GROUP BY lower(category)`);
+    const { rows: esum } = await pool.query(`SELECT lower(category) AS cat, COALESCE(SUM(amount),0)::float AS total FROM expenses WHERE approved=true AND enabled=true GROUP BY lower(category)`);
+    const dMap = new Map(dsum.map(r => [r.cat, Number(r.total)]));
+    const eMap = new Map(esum.map(r => [r.cat, Number(r.total)]));
+
+    const out=[];
+    for (const folder of folders) {
+      const events=Array.isArray(folder.events)?folder.events:[];
+      const eventsMap={};
+      for (const ev of events) {
+        const name = (ev && (ev.name || ev.eventName || ev.title || ev.label)) || '';
+        const key = name.toLowerCase().trim();
+        const donationTotal = dMap.get(key) || 0;
+        const expenseTotal = eMap.get(key) || 0;
+        eventsMap[name] = {
+          donationTotal, expenseTotal, balance: donationTotal - expenseTotal,
+          donations: [],
+          config: { showDonationDetail: ev?.showDonationDetail!==false, showExpenseDetail: ev?.showExpenseDetail!==false, enabled: ev?.enabled!==false }
+        };
+      }
+      out.push({ folderName: folder.name || '', folderId: folder.id || '', events: eventsMap });
+    }
+    res.json(out);
+  } catch (e){ console.error('analytics summary error:', e); res.status(500).send('Analytics summary failed'); }
+});
+
+/* ===================== Mount analytics admin and routers ===================== */
+if (analyticsAdminRoutes) app.use('/analytics/admin', authRole(['admin','mainadmin']), analyticsAdminRoutes);
+if (analyticsRoutes) app.use('/analytics', authRole(['user','admin','mainadmin']), analyticsRoutes);
+if (totalsRoutes) app.use('/totals', authRole(['user','admin','mainadmin']), totalsRoutes);
+
+if (adminRoutes) app.use('/admin', authRole(['admin','mainadmin']), adminRoutes);
+
+// Keep your old categoryRoutes if needed; our /api/categories above will serve common needs.
+if (categoryRoutes) app.use('/api', categoryRoutes);
 
 /* ===================== Debug endpoints ===================== */
-app.get('/debug/donations', (req, res) => {
+app.get('/debug/donations', async (req, res) => {
   try {
-    const approved = (donations || []).filter(isApproved);
+    await ensureDonationsTable();
+    const { rows: all } = await pool.query('SELECT id, amount, category, approved, receipt_code FROM donations');
+    const approved = all.filter(d => d.approved);
     res.json({
-      allCount: (donations || []).length,
+      allCount: all.length,
       approvedCount: approved.length,
       approvedSample: approved.map(d => ({
-        code: d.code,
-        receiptCode: d.receiptCode,
-        amount: d.amount,
-        category: d.category,
-        approved: d.approved
+        code: d.receipt_code, receiptCode: d.receipt_code,
+        amount: Number(d.amount || 0), category: d.category, approved: d.approved
       })).slice(0, 10),
     });
   } catch (e) {
     res.status(500).json({ error: 'debug failed' });
   }
 });
-app.get('/debug/expenses', (req, res) => {
+app.get('/debug/expenses', async (req, res) => {
   try {
-    res.json({ count: (expenses || []).length, sample: (expenses || []).slice(0, 10) });
+    await ensureExpensesTable();
+    const { rows } = await pool.query('SELECT * FROM expenses ORDER BY id DESC LIMIT 10');
+    res.json({ count: rows.length, sample: rows.map(rowToExpense) });
   } catch (e) {
     res.status(500).json({ error: 'debug failed' });
   }
 });
 app.get('/debug/events', (req, res) => {
-  res.json({ folders: app.locals.folders || [] });
+  let folders = readFolders(); if (!Array.isArray(folders)) folders = [];
+  res.json({ folders });
 });
 
-// Whoami (helpful for checking token/role)
+// Whoami
 app.get('/admin/whoami', authRole(['admin','mainadmin']), (req, res) => {
   res.json(req.user);
 });
 
-/* ===================== Start server (Render compatible) ===================== */
-// Health check (for monitoring)
+/* ===================== Health + Start ===================== */
 app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
 
 const PORT = process.env.PORT || 3000;
@@ -2380,6 +2039,11 @@ const HOST = '0.0.0.0';
 async function start() {
   try {
     await ensureUsersTable();
+    await ensureExpensesTable();
+    await ensureDonationsTable();
+    await ensureGalleryTables();
+    await ensureEbooksTables();
+    await ensureCategoriesTable();
     await seedAdmin();
     app.listen(PORT, HOST, () => {
       console.log(`Server listening on http://${HOST}:${PORT}`);
