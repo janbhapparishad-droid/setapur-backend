@@ -1,35 +1,16 @@
-﻿/* --- server.js (Option B: Postgres + Cloudinary; persistent for expenses/donations/gallery/ebooks/categories) --- */
+﻿/* --- server.js (Option B with fixes: Postgres + Cloudinary; alias handler fixes + ALTERs) --- */
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const path = require('path');
-const fs = require('fs'); // optional; used only in a few places
+const fs = require('fs');
 const multer = require('multer');
 const crypto = require('crypto');
 const { Pool } = require('pg');
 const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
-
-// Optional routers you already had
-let adminRoutes = null;
-try { adminRoutes = require('./routes/adminRoutes'); } catch { console.warn('routes/adminRoutes not found'); }
-let categoryRoutes = null;
-try { categoryRoutes = require('./routes/categoryRoutes'); } catch { console.warn('routes/categoryRoutes not found'); }
-
-let analyticsAdminRoutes = null;
-try { analyticsAdminRoutes = require('./routes/analyticsAdminRoutes'); } catch { console.warn('routes/analyticsAdminRoutes not found'); }
-let analyticsRoutes = null;
-let totalsRoutes = null;
-try { analyticsRoutes = require('./routes/analyticsRoutes'); } catch { console.warn('routes/analyticsRoutes.js not found, skipping.'); }
-try { totalsRoutes = require('./routes/totalsRoutes'); } catch { console.warn('routes/totalsRoutes.js not found, using DB-based /totals.'); }
-
-// Optional store (if your admin uses it for events/folders config). Safe to keep.
-let readFolders = () => []; let writeFolders = () => {};
-try {
-  ({ readFolders, writeFolders } = require('./models/analyticsStore'));
-} catch { console.warn('models/analyticsStore not found; analytics summary will still work via DB sums.'); }
 
 const app = express();
 app.use(cors());
@@ -50,7 +31,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// Static (kept for compatibility; not used for gallery/ebooks now)
+// Static (compat; Cloudinary is primary now)
 const uploadsDir = path.join(process.cwd(), 'uploads');
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 app.use('/uploads', express.static(uploadsDir));
@@ -71,10 +52,7 @@ cloudinary.config({
 
 /* ===================== Auth helpers ===================== */
 const SECRET_KEY = process.env.JWT_SECRET || 'your_secret_key_here';
-
-function normRole(r) {
-  return String(r || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
-}
+function normRole(r) { return String(r || '').trim().toLowerCase().replace(/[\s_-]+/g, ''); }
 function authRole(roles) {
   const allowed = (Array.isArray(roles) ? roles : [roles]).map(normRole);
   return async (req, res, next) => {
@@ -85,11 +63,10 @@ function authRole(roles) {
       const verified = jwt.verify(token, SECRET_KEY);
       verified.role = normRole(verified.role);
       verified.username = String(verified.username || '');
-      req.user = verified; // { id, username, role }
+      req.user = verified;
 
-      if (!allowed.includes(req.user.role) && !allowed.includes('any')) {
-        return res.status(403).send('Forbidden');
-      }
+      if (!allowed.includes(req.user.role) && !allowed.includes('any')) return res.status(403).send('Forbidden');
+
       try {
         const users = await getUsers();
         const u = users.find(u => String(u.username) === req.user.username);
@@ -114,28 +91,17 @@ function slugify(s) {
     .replace(/\s+/g, '-')
     .replace(/-+/g, '-');
 }
-function pushNotification(username, notif) {
-  // TODO: wire if needed
+function pushNotification(_username, _notif) {
+  // no-op
 }
 const SENSITIVE_KEYS = ['screenshotUrl', 'screenshotPath', 'paymentScreenshot', 'screenshot', 'cashReceiverName', 'receiverName', 'receivedBy'];
-function isApproved(d) {
-  return d && (d.approved === true || d.approved === 'true' || d.approved === 1 || d.approved === '1');
-}
+function isApproved(d) { return d && (d.approved === true || d.approved === 'true' || d.approved === 1 || d.approved === '1'); }
 function redactDonationForRole(d, role) {
   const out = { ...d };
   if (isApproved(out) && role !== 'mainadmin') {
     SENSITIVE_KEYS.forEach((k) => { if (k in out) delete out[k]; });
   }
   return out;
-}
-function normStr(x) { return String(x || '').toLowerCase().trim(); }
-function matchesDonation(d, q) {
-  const s = normStr(q);
-  if (!s) return true;
-  const name = normStr(d.donorName || d.donorUsername || '');
-  const rc = normStr(d.receiptCode || d.code || '');
-  const cat = normStr(d.category || '');
-  return name.includes(s) || rc.includes(s) || cat.includes(s);
 }
 const ALPHA = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 const DIGITS = '0123456789';
@@ -267,7 +233,6 @@ app.post('/auth/login', async (req, res) => {
   if (!validPass) return res.status(400).send('Invalid password');
 
   user.loggedIn = deviceId; await saveUsers(users);
-
   const cleanRole = normRole(user.role || 'user');
   const token = jwt.sign({ id: user.id, username: user.username, role: cleanRole }, SECRET_KEY, { expiresIn: '8h' });
   res.json({ token });
@@ -306,7 +271,7 @@ app.get('/admin/users', authRole(['admin','mainadmin']), async (req, res) => {
   res.json(users.map(u => ({ id: u.id, username: u.username, role: u.role, banned: !!u.banned })));
 });
 
-/* ===================== DB Schema Ensures (Expenses/Donations/Gallery/Ebooks/Categories) ===================== */
+/* ===================== DB Schema Ensures (with ALTERs) ===================== */
 async function ensureExpensesTable() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS expenses (
@@ -316,17 +281,20 @@ async function ensureExpensesTable() {
       description TEXT,
       paid_to TEXT,
       date TIMESTAMPTZ,
-      created_at TIMESTAMPTZ DEFAULT now(),
-      updated_at TIMESTAMPTZ DEFAULT now(),
-      enabled BOOLEAN DEFAULT TRUE,
-      approved BOOLEAN DEFAULT FALSE,
-      status TEXT DEFAULT 'pending',
-      submitted_by TEXT,
-      submitted_by_id INT,
-      approved_by TEXT,
-      approved_by_id INT,
-      approved_at TIMESTAMPTZ
+      created_at TIMESTAMPTZ DEFAULT now()
     );
+  `);
+  await pool.query(`
+    ALTER TABLE expenses
+      ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now(),
+      ADD COLUMN IF NOT EXISTS enabled BOOLEAN DEFAULT TRUE,
+      ADD COLUMN IF NOT EXISTS approved BOOLEAN DEFAULT FALSE,
+      ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending',
+      ADD COLUMN IF NOT EXISTS submitted_by TEXT,
+      ADD COLUMN IF NOT EXISTS submitted_by_id INT,
+      ADD COLUMN IF NOT EXISTS approved_by TEXT,
+      ADD COLUMN IF NOT EXISTS approved_by_id INT,
+      ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;
     CREATE INDEX IF NOT EXISTS idx_expenses_cat ON expenses (lower(category));
     CREATE INDEX IF NOT EXISTS idx_expenses_approved_enabled ON expenses (approved, enabled);
   `);
@@ -348,14 +316,17 @@ async function ensureDonationsTable() {
       screenshot_public_id TEXT,
       screenshot_url TEXT,
       receipt_code TEXT UNIQUE,
-      created_at TIMESTAMPTZ DEFAULT now(),
-      updated_at TIMESTAMPTZ DEFAULT now(),
-      approved_by TEXT,
-      approved_by_id INT,
-      approved_by_role TEXT,
-      approved_by_name TEXT,
-      approved_at TIMESTAMPTZ
+      created_at TIMESTAMPTZ DEFAULT now()
     );
+  `);
+  await pool.query(`
+    ALTER TABLE donations
+      ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now(),
+      ADD COLUMN IF NOT EXISTS approved_by TEXT,
+      ADD COLUMN IF NOT EXISTS approved_by_id INT,
+      ADD COLUMN IF NOT EXISTS approved_by_role TEXT,
+      ADD COLUMN IF NOT EXISTS approved_by_name TEXT,
+      ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;
     CREATE INDEX IF NOT EXISTS idx_donations_cat ON donations (lower(category));
     CREATE INDEX IF NOT EXISTS idx_donations_approved ON donations (approved);
     CREATE INDEX IF NOT EXISTS idx_donations_created ON donations (created_at);
@@ -367,24 +338,32 @@ async function ensureGalleryTables() {
     CREATE TABLE IF NOT EXISTS gallery_folders (
       slug TEXT PRIMARY KEY,
       name TEXT NOT NULL,
-      enabled BOOLEAN DEFAULT TRUE,
-      order_index INT DEFAULT 0,
-      cover_public_id TEXT,
-      cover_url TEXT,
-      icon_public_id TEXT,
-      icon_key TEXT
+      enabled BOOLEAN DEFAULT TRUE
     );
+  `);
+  await pool.query(`
+    ALTER TABLE gallery_folders
+      ADD COLUMN IF NOT EXISTS order_index INT DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS cover_public_id TEXT,
+      ADD COLUMN IF NOT EXISTS cover_url TEXT,
+      ADD COLUMN IF NOT EXISTS icon_public_id TEXT,
+      ADD COLUMN IF NOT EXISTS icon_key TEXT;
+  `);
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS gallery_images (
       id SERIAL PRIMARY KEY,
       folder_slug TEXT REFERENCES gallery_folders(slug) ON DELETE CASCADE,
       public_id TEXT UNIQUE NOT NULL,
       url TEXT NOT NULL,
-      filename TEXT NOT NULL,
-      enabled BOOLEAN DEFAULT TRUE,
-      order_index INT DEFAULT 0,
-      bytes INT,
-      uploaded_at TIMESTAMPTZ DEFAULT now()
+      filename TEXT NOT NULL
     );
+  `);
+  await pool.query(`
+    ALTER TABLE gallery_images
+      ADD COLUMN IF NOT EXISTS enabled BOOLEAN DEFAULT TRUE,
+      ADD COLUMN IF NOT EXISTS order_index INT DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS bytes INT,
+      ADD COLUMN IF NOT EXISTS uploaded_at TIMESTAMPTZ DEFAULT now();
     CREATE INDEX IF NOT EXISTS idx_gallery_images_folder ON gallery_images (folder_slug);
     CREATE INDEX IF NOT EXISTS idx_gallery_images_enabled ON gallery_images (enabled);
   `);
@@ -397,17 +376,22 @@ async function ensureEbooksTables() {
       name TEXT NOT NULL,
       enabled BOOLEAN DEFAULT TRUE
     );
+  `);
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS ebook_files (
       id SERIAL PRIMARY KEY,
       folder_slug TEXT REFERENCES ebook_folders(slug) ON DELETE CASCADE,
       public_id TEXT UNIQUE NOT NULL,
       url TEXT NOT NULL,
-      filename TEXT NOT NULL,
-      enabled BOOLEAN DEFAULT TRUE,
-      order_index INT DEFAULT 0,
-      bytes INT,
-      uploaded_at TIMESTAMPTZ DEFAULT now()
+      filename TEXT NOT NULL
     );
+  `);
+  await pool.query(`
+    ALTER TABLE ebook_files
+      ADD COLUMN IF NOT EXISTS enabled BOOLEAN DEFAULT TRUE,
+      ADD COLUMN IF NOT EXISTS order_index INT DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS bytes INT,
+      ADD COLUMN IF NOT EXISTS uploaded_at TIMESTAMPTZ DEFAULT now();
     CREATE INDEX IF NOT EXISTS idx_ebook_files_folder ON ebook_files (folder_slug);
     CREATE INDEX IF NOT EXISTS idx_ebook_files_enabled ON ebook_files (enabled);
   `);
@@ -421,13 +405,13 @@ async function ensureCategoriesTable() {
       enabled BOOLEAN DEFAULT TRUE,
       created_at TIMESTAMPTZ DEFAULT now()
     );
-    CREATE INDEX IF NOT EXISTS idx_categories_enabled ON categories (enabled);
   `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_categories_enabled ON categories (enabled);`);
   console.log('DB ready: categories');
 }
 
-/* ===================== Categories (basic CRUD; persistent) ===================== */
-app.get('/api/categories', authRole(['user','admin','mainadmin']), async (req, res) => {
+/* ===================== Categories (DB) + FE aliases ===================== */
+const listCategoriesHandler = async (req, res) => {
   try {
     await ensureCategoriesTable();
     const role = req.user?.role || 'user';
@@ -439,9 +423,8 @@ app.get('/api/categories', authRole(['user','admin','mainadmin']), async (req, r
     const { rows } = await pool.query(sql);
     res.json(rows);
   } catch (e) { console.error('categories list error:', e); res.status(500).send('Failed to list categories'); }
-});
-
-app.post('/api/categories', authRole(['admin','mainadmin']), async (req, res) => {
+};
+const createCategoryHandler = async (req, res) => {
   try {
     await ensureCategoriesTable();
     const { name, enabled } = req.body || {};
@@ -454,36 +437,13 @@ app.post('/api/categories', authRole(['admin','mainadmin']), async (req, res) =>
     if ((e.code || '').startsWith('23')) return res.status(409).json({ error: 'category already exists' });
     console.error('categories create error:', e); res.status(500).send('Create failed');
   }
-});
+};
 
-app.put('/api/categories/:id', authRole(['admin','mainadmin']), async (req, res) => {
-  try {
-    await ensureCategoriesTable();
-    const { id } = req.params;
-    const { name, enabled } = req.body || {};
-    const fields = []; const vals = []; let idx = 1;
-    if (typeof name === 'string' && name.trim()) { fields.push(`name = $${idx++}`); vals.push(name.trim()); }
-    if (enabled !== undefined) { fields.push(`enabled = $${idx++}`); vals.push(!(enabled === false || enabled === 'false' || enabled === 0 || enabled === '0')); }
-    if (!fields.length) return res.status(400).json({ error: 'No changes' });
-    vals.push(id);
-    const { rows } = await pool.query(`UPDATE categories SET ${fields.join(', ')} WHERE id=$${idx} RETURNING *`, vals);
-    if (!rows.length) return res.status(404).json({ error: 'Not found' });
-    res.json(rows[0]);
-  } catch (e) {
-    if ((e.code || '').startsWith('23')) return res.status(409).json({ error: 'duplicate name' });
-    console.error('categories update error:', e); res.status(500).send('Update failed');
-  }
-});
-
-app.delete('/api/categories/:id', authRole(['admin','mainadmin']), async (req, res) => {
-  try {
-    await ensureCategoriesTable();
-    const { id } = req.params;
-    const { rowCount } = await pool.query('DELETE FROM categories WHERE id=$1', [id]);
-    if (!rowCount) return res.status(404).json({ error: 'Not found' });
-    res.json({ ok: true });
-  } catch (e) { console.error('categories delete error:', e); res.status(500).send('Delete failed'); }
-});
+app.get('/api/categories', authRole(['user','admin','mainadmin']), listCategoriesHandler);
+app.post('/api/categories', authRole(['admin','mainadmin']), createCategoryHandler);
+// FE aliases
+app.get('/api/categories/list', authRole(['user','admin','mainadmin']), listCategoriesHandler);
+app.post('/api/admin/categories', authRole(['admin','mainadmin']), createCategoryHandler);
 
 /* ===================== Expenses (Postgres) ===================== */
 function rowToExpense(r) {
@@ -744,7 +704,7 @@ function rowToDonation(r) {
   };
 }
 
-app.post('/api/donations/submit-donation', authRole(['user','admin','mainadmin']), uploadDonation.single('screenshot'), async (req, res) => {
+async function createDonationHandler(req, res) {
   try {
     await ensureDonationsTable();
     const { amount, paymentMethod, category, cashReceiverName, donorName } = req.body || {};
@@ -769,14 +729,19 @@ app.post('/api/donations/submit-donation', authRole(['user','admin','mainadmin']
     console.error('submit-donation error:', err);
     res.status(500).send('Failed to submit donation');
   }
-});
-// alias
-app.post('/api/donations/create', authRole(['user','admin','mainadmin']), uploadDonation.single('screenshot'), async (req, res) => {
-  // same as submit-donation
-  const handler = app._router.stack.find(l => l.route && l.route.path === '/api/donations/submit-donation' && l.route.methods.post);
-  if (handler) return handler.handle_method(req, res, 'post');
-  res.status(500).send('Handler missing');
-});
+}
+
+app.post('/api/donations/submit-donation',
+  authRole(['user','admin','mainadmin']),
+  uploadDonation.single('screenshot'),
+  createDonationHandler
+);
+// Alias direct to same handler
+app.post('/api/donations/create',
+  authRole(['user','admin','mainadmin']),
+  uploadDonation.single('screenshot'),
+  createDonationHandler
+);
 
 app.get('/myaccount/receipts', authRole(['user','admin','mainadmin']), async (req, res) => {
   await ensureDonationsTable();
@@ -960,7 +925,7 @@ app.post('/admin/donations/:id/disapprove', authRole(['admin', 'mainadmin']), as
   }
 });
 
-app.put('/admin/donations/:id', authRole(['admin', 'mainadmin']), async (req, res) => {
+async function handleDonationUpdate(req, res) {
   try {
     await ensureDonationsTable();
     const { id } = req.params;
@@ -1001,78 +966,9 @@ app.put('/admin/donations/:id', authRole(['admin', 'mainadmin']), async (req, re
     console.error('update donation error:', e);
     res.status(500).send('Update donation failed');
   }
-});
-app.put('/api/donations/:id', authRole(['admin', 'mainadmin']), async (req, res) => {
-  // alias to admin path
-  req.url = `/admin/donations/${req.params.id}`;
-  const layer = app._router.stack.find(l => l.route && l.route.path === '/admin/donations/:id' && l.route.methods.put);
-  if (layer) return layer.handle_method(req, res, 'put');
-  res.status(500).send('Handler missing');
-});
-
-app.post('/api/donations/approve', authRole(['admin','mainadmin']), async (req, res) => {
-  try {
-    await ensureDonationsTable();
-    const { id, approve } = req.body || {};
-    if (!id) return res.status(400).json({ error: 'id required' });
-    const wantApprove = (approve === true || approve === 'true' || approve === 1 || approve === '1');
-
-    if (wantApprove) {
-      const { rows: curRows } = await pool.query('SELECT * FROM donations WHERE id=$1', [id]);
-      if (!curRows.length) return res.status(404).json({ error: 'Donation not found' });
-      let d = curRows[0];
-
-      let rc = (d.receipt_code || '').toUpperCase();
-      const valid = rc.length === 6 && /^[A-Z0-9]{6}$/.test(rc) && /[A-Z]/.test(rc) && /\d/.test(rc);
-      if (!valid) rc = await generateUniqueReceiptCodeDB();
-
-      let approvedByName = req.user.username;
-      try {
-        const users = await getUsers();
-        const approver = users.find(u => u.username === req.user.username);
-        approvedByName = approver?.name || approver?.fullName || approver?.displayName || approvedByName;
-      } catch {}
-
-      const alreadyApproved = d.approved === true;
-
-      const { rows: upd } = await pool.query(
-        `UPDATE donations SET
-           approved=true, status='approved',
-           approved_by=$1, approved_by_id=$2, approved_by_role=$3, approved_by_name=$4, approved_at=now(),
-           receipt_code=$5, updated_at=now()
-         WHERE id=$6
-         RETURNING *`,
-        [req.user.username, req.user.id, req.user.role, approvedByName, rc, id]
-      );
-      const out = rowToDonation(upd[0]);
-
-      if (!alreadyApproved) {
-        const donorUser = out.donorUsername || out.donorName || null;
-        const rcOut = out.receiptCode || out.code || '';
-        if (donorUser) {
-          pushNotification(donorUser, {
-            type: 'donationApproval',
-            title: 'Donation approved',
-            body: `Receipt: ${rcOut || 'N/A'} • Event: ${out.category} • Amount: ₹${pgNum(out.amount)}`,
-            data: { receiptCode: rcOut || null, category: out.category, amount: out.amount, paymentMethod: out.paymentMethod, approved: true },
-          });
-        }
-      }
-      return res.json({ message: 'Donation approved', donation: out });
-    } else {
-      const { rows } = await pool.query(
-        `UPDATE donations SET approved=false, status='pending',
-         approved_by=NULL, approved_by_id=NULL, approved_by_role=NULL, approved_by_name=NULL, approved_at=NULL, updated_at=now()
-         WHERE id=$1 RETURNING *`, [id]
-      );
-      if (!rows.length) return res.status(404).json({ error: 'Donation not found' });
-      return res.json({ message: 'Donation set to pending', donation: rowToDonation(rows[0]) });
-    }
-  } catch (e) {
-    console.error('alias /api/donations/approve error:', e);
-    res.status(500).send('Operation failed');
-  }
-});
+}
+app.put('/admin/donations/:id', authRole(['admin', 'mainadmin']), handleDonationUpdate);
+app.put('/api/donations/:id', authRole(['admin', 'mainadmin']), handleDonationUpdate);
 
 /* ===================== Gallery (Cloudinary + Postgres) ===================== */
 const ALLOWED_ICON_KEYS = new Set([
@@ -1123,7 +1019,6 @@ async function reorderGalleryImages(folderSlug, targetIdOrName, direction, newIn
   } else if (direction === 'down' && idx >= 0 && idx < list.length - 1) {
     [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
   }
-  // write back order_index
   for (let i=0;i<list.length;i++) {
     await pool.query('UPDATE gallery_images SET order_index=$1 WHERE id=$2', [i, list[i].id]);
   }
@@ -1198,37 +1093,15 @@ app.post('/gallery/folders/create', authRole(['admin', 'mainadmin']), async (req
   }
 });
 
-// Upload images to folder (Cloudinary)
-app.post('/gallery/folders/:slug/upload', authRole(['admin', 'mainadmin']), uploadGalleryCloud.array('images', 25), async (req, res) => {
-  try {
-    await ensureGalleryTables();
-    const { slug } = req.params;
-    await ensureGalleryFolder(slug);
-    const files = req.files || [];
-    if (!files.length) return res.status(400).json({ error: 'No files uploaded' });
+// Upload images (folder)
+app.post('/gallery/folders/:slug/upload',
+  authRole(['admin', 'mainadmin']),
+  uploadGalleryCloud.array('images', 25),
+  insertGalleryUploadsToDB
+);
 
-    const { rows: r0 } = await pool.query('SELECT COALESCE(MAX(order_index), -1) AS m FROM gallery_images WHERE folder_slug=$1', [slug]);
-    let order = Number(r0[0]?.m || -1) + 1;
-
-    const inserted = [];
-    for (const f of files) {
-      const filename = path.basename(f.originalname || 'image').replace(/\s+/g,'-');
-      const { rows } = await pool.query(
-        `INSERT INTO gallery_images (folder_slug, public_id, url, filename, enabled, order_index, bytes)
-         VALUES ($1,$2,$3,$4,true,$5,NULL) RETURNING *`,
-        [slug, f.filename, f.path, filename, order++]
-      );
-      inserted.push(rows[0]);
-    }
-    res.status(201).json({ uploaded: inserted.map(r => ({ id:r.id, filename:r.filename, url:r.url })), count: inserted.length });
-  } catch (e) {
-    console.error('gallery upload error:', e);
-    res.status(500).send('Upload failed');
-  }
-});
-
-// Root images (list + upload) via slug '_root'
-app.get('/gallery/images', authRole(['user', 'admin', 'mainadmin']), async (req, res) => {
+// Root images: list
+async function listRootGalleryImages(req, res) {
   try {
     await ensureGalleryTables();
     const role = (req.user && req.user.role) || 'user';
@@ -1253,23 +1126,22 @@ app.get('/gallery/images', authRole(['user', 'admin', 'mainadmin']), async (req,
     console.error('gallery root images error:', e);
     res.status(500).send('Failed to list gallery images');
   }
-});
-app.get('/gallery/home/images', authRole(['user', 'admin', 'mainadmin']), async (req, res) => {
-  req.url = '/gallery/images';
-  const layer = app._router.stack.find(l => l.route && l.route.path === '/gallery/images' && l.route.methods.get);
-  if (layer) return layer.handle_method(req, res, 'get');
-  res.status(500).send('Handler missing');
-});
+}
+app.get('/gallery/images', authRole(['user', 'admin', 'mainadmin']), listRootGalleryImages);
+app.get('/gallery/home/images', authRole(['user', 'admin', 'mainadmin']), listRootGalleryImages);
 
-app.post('/gallery/upload', authRole(['admin', 'mainadmin']), (req, res, next) => { req.params.slug = '_root'; next(); }, uploadGalleryCloud.array('images', 25), async (req, res) => {
+// Root/folder uploads shared DB inserter
+async function insertGalleryUploadsToDB(req, res) {
   try {
     await ensureGalleryTables();
-    const slug = '_root';
-    await ensureGalleryFolder(slug, 'Home');
+    const slug = String(req.params.slug || '_root');
+    await ensureGalleryFolder(slug, slug === '_root' ? 'Home' : slug);
     const files = req.files || [];
     if (!files.length) return res.status(400).json({ error: 'No files uploaded' });
+
     const { rows: r0 } = await pool.query('SELECT COALESCE(MAX(order_index), -1) AS m FROM gallery_images WHERE folder_slug=$1', [slug]);
     let order = Number(r0[0]?.m || -1) + 1;
+
     const inserted = [];
     for (const f of files) {
       const filename = path.basename(f.originalname || 'image').replace(/\s+/g,'-');
@@ -1281,9 +1153,23 @@ app.post('/gallery/upload', authRole(['admin', 'mainadmin']), (req, res, next) =
       inserted.push(rows[0]);
     }
     res.status(201).json({ uploaded: inserted.map(r => ({ id:r.id, filename:r.filename, url:r.url })), count: inserted.length });
-  } catch (e) { console.error('root upload error:', e); res.status(500).send('Upload failed'); }
-});
-app.post('/gallery/home/upload', authRole(['admin', 'mainadmin']), (req,res,next)=>{ req.url='/gallery/upload'; next(); }, (req,res)=>res.end());
+  } catch (e) { console.error('gallery upload error:', e); res.status(500).send('Upload failed'); }
+}
+
+// Root upload
+app.post('/gallery/upload',
+  authRole(['admin', 'mainadmin']),
+  (req, _res, next) => { req.params.slug = '_root'; next(); },
+  uploadGalleryCloud.array('images', 25),
+  insertGalleryUploadsToDB
+);
+// Home alias
+app.post('/gallery/home/upload',
+  authRole(['admin', 'mainadmin']),
+  (req, _res, next) => { req.params.slug = '_root'; next(); },
+  uploadGalleryCloud.array('images', 25),
+  insertGalleryUploadsToDB
+);
 
 // List images in folder
 app.get('/gallery/folders/:slug/images', authRole(['user', 'admin', 'mainadmin']), async (req, res) => {
@@ -1360,7 +1246,7 @@ app.post('/gallery/folders/:slug/reorder', authRole(['admin', 'mainadmin']), asy
   }
 });
 
-// Rename folder (changes slug + updates images' folder_slug; Cloudinary assets remain)
+// Rename folder
 app.post('/gallery/folders/:slug/rename', authRole(['admin', 'mainadmin']), async (req, res) => {
   try {
     await ensureGalleryTables();
@@ -1390,15 +1276,14 @@ app.post('/gallery/folders/:slug/rename', authRole(['admin', 'mainadmin']), asyn
   }
 });
 
-// Delete folder (DB + Cloudinary assets by folder prefix optional)
+// Delete folder
 app.delete('/gallery/folders/:slug', authRole(['admin', 'mainadmin']), async (req, res) => {
   try {
     await ensureGalleryTables();
     const { slug } = req.params;
 
-    // Delete Cloudinary images within folder (optional but recommended)
+    // Optional Cloudinary cleanup
     try {
-      // NOTE: Cloudinary Admin delete by prefix; use with caution in production
       const prefix = `setapur/gallery/${slug}`;
       const { resources } = await cloudinary.search.expression(`folder:${prefix}`).max_results(500).execute();
       for (const r of (resources || [])) {
@@ -1472,7 +1357,6 @@ app.post('/gallery/folders/:slug/images/rename', authRole(['admin', 'mainadmin']
       row = rows[0];
     } else return res.status(400).json({ error: 'id or filename required' });
 
-    // new public id
     const base = path.basename(newName, path.extname(newName));
     const safeBase = slugify(base) || 'img';
     const newPublicId = `setapur/gallery/${slug}/${Date.now()}-${Math.round(Math.random()*1e9)}-${safeBase}`;
@@ -1544,7 +1428,7 @@ app.post('/gallery/folders/:slug/cover', authRole(['admin', 'mainadmin']), async
   }
 });
 
-// Set/Clear icon (built-in key or from image public_id)
+// Set/Clear icon
 app.post('/gallery/folders/:slug/icon', authRole(['admin', 'mainadmin']), async (req, res) => {
   try {
     await ensureGalleryTables();
@@ -1563,7 +1447,6 @@ app.post('/gallery/folders/:slug/icon', authRole(['admin', 'mainadmin']), async 
       return res.json({ ok: true, slug, iconFile: null, iconKey: key, iconUrl: null });
     }
 
-    // use existing image as icon
     let row = null;
     if (imageId) {
       const { rows } = await pool.query('SELECT * FROM gallery_images WHERE id=$1 AND folder_slug=$2', [imageId, slug]);
@@ -1584,7 +1467,7 @@ app.post('/gallery/folders/:slug/icon', authRole(['admin', 'mainadmin']), async 
 });
 
 /* ===================== E-Books (Cloudinary raw + Postgres) ===================== */
-const uploadEbooksCloud = new multer({
+const uploadEbooksCloud = multer({
   storage: new CloudinaryStorage({
     cloudinary,
     params: async (req, file) => {
@@ -1613,7 +1496,6 @@ app.get('/ebooks/folders', authRole(['user','admin','mainadmin']), async (req, r
     if (!isAdmin && !includeDisabled) sql += ' WHERE enabled = true';
     sql += ' ORDER BY lower(name) ASC';
     const { rows } = await pool.query(sql);
-    // compute file counts
     const out = [];
     for (const f of rows) {
       const { rows: cnt } = await pool.query('SELECT COUNT(*)::int AS c FROM ebook_files WHERE folder_slug=$1', [f.slug]);
@@ -1731,7 +1613,7 @@ app.delete('/ebooks/folders/:slug', authRole(['admin','mainadmin']), async (req,
     await ensureEbooksTables();
     const { slug } = req.params;
 
-    // Optionally delete Cloudinary assets in folder
+    // Optional Cloudinary cleanup
     try {
       const prefix = `setapur/ebooks/${slug}`;
       const { resources } = await cloudinary.search.expression(`folder:${prefix}`).max_results(500).execute();
@@ -1944,54 +1826,24 @@ app.get('/totals', authRole(['user','admin','mainadmin']), async (req, res) => {
 app.get('/analytics/summary', authRole(['user','admin','mainadmin']), async (req, res) => {
   try {
     await ensureDonationsTable(); await ensureExpensesTable();
-    // Optional folders config (from file or admin UI you have)
-    let folders = readFolders(); if (!Array.isArray(folders)) folders = [];
-    if (!folders.length) {
-      folders = [{
-        id: 'default-1',
-        name: 'shri krishna janmastami',
-        events: [
-          { id: 'evt-1', name: 'shri krishna janmastami 2025', enabled: true, showDonationDetail: true, showExpenseDetail: true },
-          { id: 'evt-2', name: 'shri krishna chhathi 2025', enabled: true, showDonationDetail: true, showExpenseDetail: true },
-        ],
-      }];
+    const { rows: dsum } = await pool.query(`SELECT category, COALESCE(SUM(amount),0)::float AS total FROM donations WHERE approved=true GROUP BY category`);
+    const { rows: esum } = await pool.query(`SELECT category, COALESCE(SUM(amount),0)::float AS total FROM expenses WHERE approved=true AND enabled=true GROUP BY category`);
+    // simple merged summary by category
+    const map = new Map();
+    for (const r of dsum) {
+      const k = (r.category || '').trim();
+      if (!map.has(k)) map.set(k, { category: k, donationTotal: 0, expenseTotal: 0 });
+      map.get(k).donationTotal += Number(r.total || 0);
     }
-
-    const { rows: dsum } = await pool.query(`SELECT lower(category) AS cat, COALESCE(SUM(amount),0)::float AS total FROM donations WHERE approved=true GROUP BY lower(category)`);
-    const { rows: esum } = await pool.query(`SELECT lower(category) AS cat, COALESCE(SUM(amount),0)::float AS total FROM expenses WHERE approved=true AND enabled=true GROUP BY lower(category)`);
-    const dMap = new Map(dsum.map(r => [r.cat, Number(r.total)]));
-    const eMap = new Map(esum.map(r => [r.cat, Number(r.total)]));
-
-    const out=[];
-    for (const folder of folders) {
-      const events=Array.isArray(folder.events)?folder.events:[];
-      const eventsMap={};
-      for (const ev of events) {
-        const name = (ev && (ev.name || ev.eventName || ev.title || ev.label)) || '';
-        const key = name.toLowerCase().trim();
-        const donationTotal = dMap.get(key) || 0;
-        const expenseTotal = eMap.get(key) || 0;
-        eventsMap[name] = {
-          donationTotal, expenseTotal, balance: donationTotal - expenseTotal,
-          donations: [],
-          config: { showDonationDetail: ev?.showDonationDetail!==false, showExpenseDetail: ev?.showExpenseDetail!==false, enabled: ev?.enabled!==false }
-        };
-      }
-      out.push({ folderName: folder.name || '', folderId: folder.id || '', events: eventsMap });
+    for (const r of esum) {
+      const k = (r.category || '').trim();
+      if (!map.has(k)) map.set(k, { category: k, donationTotal: 0, expenseTotal: 0 });
+      map.get(k).expenseTotal += Number(r.total || 0);
     }
+    const out = Array.from(map.values()).map(x => ({ ...x, balance: (x.donationTotal - x.expenseTotal) }));
     res.json(out);
   } catch (e){ console.error('analytics summary error:', e); res.status(500).send('Analytics summary failed'); }
 });
-
-/* ===================== Mount analytics admin and routers ===================== */
-if (analyticsAdminRoutes) app.use('/analytics/admin', authRole(['admin','mainadmin']), analyticsAdminRoutes);
-if (analyticsRoutes) app.use('/analytics', authRole(['user','admin','mainadmin']), analyticsRoutes);
-if (totalsRoutes) app.use('/totals', authRole(['user','admin','mainadmin']), totalsRoutes);
-
-if (adminRoutes) app.use('/admin', authRole(['admin','mainadmin']), adminRoutes);
-
-// Keep your old categoryRoutes if needed; our /api/categories above will serve common needs.
-if (categoryRoutes) app.use('/api', categoryRoutes);
 
 /* ===================== Debug endpoints ===================== */
 app.get('/debug/donations', async (req, res) => {
@@ -2019,10 +1871,6 @@ app.get('/debug/expenses', async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: 'debug failed' });
   }
-});
-app.get('/debug/events', (req, res) => {
-  let folders = readFolders(); if (!Array.isArray(folders)) folders = [];
-  res.json({ folders });
 });
 
 // Whoami
