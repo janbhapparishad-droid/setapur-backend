@@ -41,69 +41,7 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { require: true, rejectUnauthorized: false },
 });
-
-/* === ANALYTICS_ADMIN_GLOBAL_FIX (defines globals right after Pool) === */
-global.ensureAnalyticsConfigTables = global.ensureAnalyticsConfigTables || (async function() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS analytics_folders (
-      id SERIAL PRIMARY KEY,
-      name TEXT NOT NULL,
-      slug TEXT UNIQUE,
-      enabled BOOLEAN DEFAULT TRUE,
-      order_index INT DEFAULT 0,
-      created_at TIMESTAMPTZ DEFAULT now()
-    );
-    CREATE TABLE IF NOT EXISTS analytics_events (
-      id SERIAL PRIMARY KEY,
-      folder_id INT REFERENCES analytics_folders(id) ON DELETE CASCADE,
-      name TEXT NOT NULL,
-      enabled BOOLEAN DEFAULT TRUE,
-      show_donation_detail BOOLEAN DEFAULT TRUE,
-      show_expense_detail BOOLEAN DEFAULT TRUE,
-      order_index INT DEFAULT 0,
-      created_at TIMESTAMPTZ DEFAULT now()
-    );
-    CREATE INDEX IF NOT EXISTS idx_analytics_folders_order ON analytics_folders(order_index, lower(name));
-    CREATE INDEX IF NOT EXISTS idx_analytics_events_folder ON analytics_events(folder_id);
-    CREATE INDEX IF NOT EXISTS idx_analytics_events_order ON analytics_events(folder_id, order_index);
-  `);
-});
-const ensureAnalyticsConfigTables = global.ensureAnalyticsConfigTables;
-
-global.reorderAnalyticsFolders = global.reorderAnalyticsFolders || (async function(folderId, direction, newIndex) {
-  const { rows } = await pool.query('SELECT id FROM analytics_folders ORDER BY order_index ASC, lower(name) ASC');
-  let list = rows.map(r => r.id);
-  let idx = list.indexOf(Number(folderId));
-  if (idx === -1) return;
-  if (typeof newIndex === 'number' && Number.isFinite(newIndex)) {
-    const it = list.splice(idx,1)[0];
-    list.splice(Math.max(0, Math.min(newIndex, list.length)), 0, it);
-  } else if (direction === 'up' && idx > 0) {
-    [list[idx-1], list[idx]] = [list[idx], list[idx-1]];
-  } else if (direction === 'down' && idx < list.length - 1) {
-    [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
-  }
-  for (let i=0;i<list.length;i++) await pool.query('UPDATE analytics_folders SET order_index=$1 WHERE id=$2', [i, list[i]]);
-});
-const reorderAnalyticsFolders = global.reorderAnalyticsFolders;
-
-global.reorderAnalyticsEvents = global.reorderAnalyticsEvents || (async function(folderId, eventId, direction, newIndex) {
-  const { rows } = await pool.query('SELECT id FROM analytics_events WHERE folder_id=$1 ORDER BY order_index ASC, id ASC', [folderId]);
-  let list = rows.map(r => r.id);
-  let idx = list.indexOf(Number(eventId));
-  if (idx === -1) return;
-  if (typeof newIndex === 'number' && Number.isFinite(newIndex)) {
-    const it = list.splice(idx,1)[0];
-    list.splice(Math.max(0, Math.min(newIndex, list.length)), 0, it);
-  } else if (direction === 'up' && idx > 0) {
-    [list[idx-1], list[idx]] = [list[idx], list[idx-1]];
-  } else if (direction === 'down' && idx < list.length - 1) {
-    [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
-  }
-  for (let i=0;i<list.length;i++) await pool.query('UPDATE analytics_events SET order_index=$1 WHERE id=$2', [i, list[i]]);
-});
-const reorderAnalyticsEvents = global.reorderAnalyticsEvents;
-/* === END ANALYTICS_ADMIN_GLOBAL_FIX === */function pgNum(x) { const n = Number(x); return Number.isFinite(n) ? n : 0; }
+function pgNum(x) { const n = Number(x); return Number.isFinite(n) ? n : 0; }
 
 /* ===================== Cloudinary ===================== */
 cloudinary.config({
@@ -2445,4 +2383,3 @@ app.get('/debug/analytics-admin/diag', async (req,res)=>{
 });
 
 /* === ANALYTICS_ADMIN_ALIASES_END === */
-
