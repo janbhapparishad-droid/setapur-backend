@@ -42,6 +42,9 @@ const pool = new Pool({
   ssl: { require: true, rejectUnauthorized: false },
 });
 
+
+
+
 /* === ANALYTICS_ADMIN_NS_BEGIN === */
 global.AnalyticsAdmin = global.AnalyticsAdmin || {};
 
@@ -1966,10 +1969,10 @@ async function start() {
 }
 start();/* === Injected: Analytics Admin (DB-based) === */
 if (typeof ensureAnalyticsConfigTables !== 'function') {
-
+  /* dedup: ensureAnalyticsConfigTables removed (use global version) */
 }
 if (typeof reorderAnalyticsFolders !== 'function') {
-
+  /* dedup: reorderAnalyticsFolders removed (use global version) */ = await pool.query('SELECT id FROM analytics_folders ORDER BY order_index ASC, lower(name) ASC');
     let list = rows.map(r => r.id);
     let idx = list.indexOf(Number(folderId));
     if (idx === -1) return;
@@ -1985,7 +1988,7 @@ if (typeof reorderAnalyticsFolders !== 'function') {
   }
 }
 if (typeof reorderAnalyticsEvents !== 'function') {
-
+  /* dedup: reorderAnalyticsEvents removed (use global version) */ = await pool.query('SELECT id FROM analytics_events WHERE folder_id=$1 ORDER BY order_index ASC, id ASC', [folderId]);
     let list = rows.map(r => r.id);
     let idx = list.indexOf(Number(eventId));
     if (idx === -1) return;
@@ -2147,14 +2150,16 @@ app.post('/analytics/admin/events/reorder', authRole(['admin','mainadmin']), asy
 });
 /* === End Injected: Analytics Admin (DB-based) === */
 
+
+
 /* === ANALYTICS_ADMIN_ALIASES_BEGIN === */
 
 /* Ensure tables (if not already present) */
 if (typeof ensureAnalyticsConfigTables !== 'function') {
-
+  /* dedup: ensureAnalyticsConfigTables removed (use global version) */
 }
 if (typeof reorderAnalyticsFolders !== 'function') {
-
+  /* dedup: reorderAnalyticsFolders removed (use global version) */ = await pool.query('SELECT id FROM analytics_folders ORDER BY order_index ASC, lower(name) ASC');
     let list = rows.map(r => r.id);
     let idx = list.indexOf(Number(folderId));
     if (idx === -1) return;
@@ -2170,7 +2175,7 @@ if (typeof reorderAnalyticsFolders !== 'function') {
   }
 }
 if (typeof reorderAnalyticsEvents !== 'function') {
-
+  /* dedup: reorderAnalyticsEvents removed (use global version) */ = await pool.query('SELECT id FROM analytics_events WHERE folder_id=$1 ORDER BY order_index ASC, id ASC', [folderId]);
     let list = rows.map(r => r.id);
     let idx = list.indexOf(Number(eventId));
     if (idx === -1) return;
@@ -2382,9 +2387,14 @@ app.get('/debug/analytics-admin/diag', async (req,res)=>{
 
 /* === ANALYTICS_ADMIN_ALIASES_END === */
 
+
+
 /* === ANALYTICS_ADMIN_DB_MOUNT_BEGIN === */
 /* DB-based Manage Analytics on /analytics/admin */
 
+/* dedup: ensureAnalyticsConfigTables removed (use global version) */
+
+/* dedup: reorderAnalyticsFolders removed (use global version) */ = await pool.query('SELECT id FROM analytics_folders ORDER BY order_index ASC, lower(name) ASC');
   let list = rows.map(r => r.id);
   let idx = list.indexOf(Number(folderId));
   if (idx === -1) return;
@@ -2398,7 +2408,7 @@ app.get('/debug/analytics-admin/diag', async (req,res)=>{
   }
   for (let i=0;i<list.length;i++) await pool.query('UPDATE analytics_folders SET order_index=$1 WHERE id=$2', [i, list[i]]);
 }
-
+/* dedup: reorderAnalyticsEvents removed (use global version) */ = await pool.query('SELECT id FROM analytics_events WHERE folder_id=$1 ORDER BY order_index ASC, id ASC', [folderId]);
   let list = rows.map(r => r.id);
   let idx = list.indexOf(Number(eventId));
   if (idx === -1) return;
@@ -2606,6 +2616,8 @@ app.post('/analytics/admin/events/reorder', authRole(['admin','mainadmin']), asy
 });
 /* === ANALYTICS_ADMIN_DB_MOUNT_END === */
 
+
+
 /* === ANALYTICS_ADMIN_ROUTES_BEGIN === */
 function aBool(x){ return !(x===false||x==="false"||x===0||x==="0"); }
 function aSlug(s){
@@ -2775,7 +2787,3 @@ app.post("/analytics/admin/events/reorder", authRole(["admin","mainadmin"]), asy
   } catch (e){ console.error("reorder event err:", e); res.status(500).send("Reorder failed"); }
 });
 /* === ANALYTICS_ADMIN_ROUTES_END === */
-
-const analyticsAdminDB = require("./routes/analyticsAdminDB");
-app.use("/analytics/admin", authRole(["admin","mainadmin"]), analyticsAdminDB);
-
