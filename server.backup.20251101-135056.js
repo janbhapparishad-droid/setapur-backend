@@ -48,7 +48,7 @@ global.ensureAnalyticsConfigTables = global.ensureAnalyticsConfigTables || (asyn
     CREATE TABLE IF NOT EXISTS analytics_folders (
       id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,
-      slug TEXT,
+      slug TEXT UNIQUE,
       enabled BOOLEAN DEFAULT TRUE,
       order_index INT DEFAULT 0,
       created_at TIMESTAMPTZ DEFAULT now()
@@ -1970,7 +1970,7 @@ if (typeof ensureAnalyticsConfigTables !== 'function') {
       CREATE TABLE IF NOT EXISTS analytics_folders (
         id SERIAL PRIMARY KEY,
         name TEXT NOT NULL,
-        slug TEXT,
+        slug TEXT UNIQUE,
         enabled BOOLEAN DEFAULT TRUE,
         order_index INT DEFAULT 0,
         created_at TIMESTAMPTZ DEFAULT now()
@@ -2188,7 +2188,7 @@ if (typeof ensureAnalyticsConfigTables !== 'function') {
       CREATE TABLE IF NOT EXISTS analytics_folders (
         id SERIAL PRIMARY KEY,
         name TEXT NOT NULL,
-        slug TEXT,
+        slug TEXT UNIQUE,
         enabled BOOLEAN DEFAULT TRUE,
         order_index INT DEFAULT 0,
         created_at TIMESTAMPTZ DEFAULT now()
@@ -2445,5 +2445,4 @@ app.get('/debug/analytics-admin/diag', async (req,res)=>{
 });
 
 /* === ANALYTICS_ADMIN_ALIASES_END === */
-
 
