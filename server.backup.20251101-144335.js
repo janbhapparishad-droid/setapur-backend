@@ -44,76 +44,7 @@ const pool = new Pool({
 
 
 
-
-/* === ANALYTICS_ADMIN_NS_BEGIN === */
-global.AnalyticsAdmin = global.AnalyticsAdmin || {};
-
-if (!global.AnalyticsAdmin.ensure) {
-  global.AnalyticsAdmin.ensure = async function ensure() {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS analytics_folders (
-        id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL,
-        slug TEXT,
-        enabled BOOLEAN DEFAULT TRUE,
-        order_index INT DEFAULT 0,
-        created_at TIMESTAMPTZ DEFAULT now()
-      );
-      CREATE TABLE IF NOT EXISTS analytics_events (
-        id SERIAL PRIMARY KEY,
-        folder_id INT REFERENCES analytics_folders(id) ON DELETE CASCADE,
-        name TEXT NOT NULL,
-        enabled BOOLEAN DEFAULT TRUE,
-        show_donation_detail BOOLEAN DEFAULT TRUE,
-        show_expense_detail BOOLEAN DEFAULT TRUE,
-        order_index INT DEFAULT 0,
-        created_at TIMESTAMPTZ DEFAULT now()
-      );
-      CREATE INDEX IF NOT EXISTS idx_analytics_folders_order ON analytics_folders(order_index, lower(name));
-      CREATE INDEX IF NOT EXISTS idx_analytics_events_folder ON analytics_events(folder_id);
-      CREATE INDEX IF NOT EXISTS idx_analytics_events_order ON analytics_events(folder_id, order_index);
-    `);
-  };
-}
-if (!global.AnalyticsAdmin.reorderFolders) {
-  global.AnalyticsAdmin.reorderFolders = async function reorderFolders(folderId, direction, newIndex) {
-    const { rows } = await pool.query('SELECT id FROM analytics_folders ORDER BY order_index ASC, lower(name) ASC');
-    let list = rows.map(r => r.id);
-    let idx = list.indexOf(Number(folderId));
-    if (idx === -1) return;
-    if (typeof newIndex === 'number' && Number.isFinite(newIndex)) {
-      const it = list.splice(idx,1)[0];
-      list.splice(Math.max(0, Math.min(newIndex, list.length)), 0, it);
-    } else if (direction === 'up' && idx > 0) {
-      [list[idx-1], list[idx]] = [list[idx], list[idx-1]];
-    } else if (direction === 'down' && idx < list.length - 1) {
-      [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
-    }
-    for (let i=0;i<list.length;i++) {
-      await pool.query('UPDATE analytics_folders SET order_index=$1 WHERE id=$2', [i, list[i]]);
-    }
-  };
-}
-if (!global.AnalyticsAdmin.reorderEvents) {
-  global.AnalyticsAdmin.reorderEvents = async function reorderEvents(folderId, eventId, direction, newIndex) {
-    const { rows } = await pool.query('SELECT id FROM analytics_events WHERE folder_id=$1 ORDER BY order_index ASC, id ASC', [folderId]);
-    let list = rows.map(r => r.id);
-    let idx = list.indexOf(Number(eventId));
-    if (idx === -1) return;
-    if (typeof newIndex === 'number' && Number.isFinite(newIndex)) {
-      const it = list.splice(idx,1)[0];
-      list.splice(Math.max(0, Math.min(newIndex, list.length)), 0, it);
-    } else if (direction === 'up' && idx > 0) {
-      [list[idx-1], list[idx]] = [list[idx], list[idx-1]];
-    } else if (direction === 'down' && idx < list.length - 1) {
-      [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
-    }
-    for (let i=0;i<list.length;i++) {
-      await pool.query('UPDATE analytics_events SET order_index=$1 WHERE id=$2', [i, list[i]]);
-    }
-  };
-}
-/* === ANALYTICS_ADMIN_NS_END === *//* === ANALYTICS_ADMIN_GLOBAL_HELPERS === */
+/* === ANALYTICS_ADMIN_GLOBAL_HELPERS === */
 var ensureAnalyticsConfigTables = global.ensureAnalyticsConfigTables || (async function () {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS analytics_folders (
@@ -142,7 +73,8 @@ var ensureAnalyticsConfigTables = global.ensureAnalyticsConfigTables || (async f
 global.ensureAnalyticsConfigTables = ensureAnalyticsConfigTables;
 
 var reorderAnalyticsFolders = global.reorderAnalyticsFolders || (async function (folderId, direction, newIndex) {
-/* removed stray top-level await */let list = rows.map(r => r.id);
+  const { rows } = await pool.query('SELECT id FROM analytics_folders ORDER BY order_index ASC, lower(name) ASC');
+  let list = rows.map(r => r.id);
   let idx = list.indexOf(Number(folderId));
   if (idx === -1) return;
   if (typeof newIndex === 'number' && Number.isFinite(newIndex)) {
@@ -154,12 +86,14 @@ var reorderAnalyticsFolders = global.reorderAnalyticsFolders || (async function 
     [list[idx + 1], list[idx]] = [list[idx], list[idx + 1]];
   }
   for (let i = 0; i < list.length; i++) {
-/* removed stray top-level await */}
+    await pool.query('UPDATE analytics_folders SET order_index=$1 WHERE id=$2', [i, list[i]]);
+  }
 });
 global.reorderAnalyticsFolders = reorderAnalyticsFolders;
 
 var reorderAnalyticsEvents = global.reorderAnalyticsEvents || (async function (folderId, eventId, direction, newIndex) {
-/* removed stray top-level await */let list = rows.map(r => r.id);
+  const { rows } = await pool.query('SELECT id FROM analytics_events WHERE folder_id=$1 ORDER BY order_index ASC, id ASC', [folderId]);
+  let list = rows.map(r => r.id);
   let idx = list.indexOf(Number(eventId));
   if (idx === -1) return;
   if (typeof newIndex === 'number' && Number.isFinite(newIndex)) {
@@ -171,10 +105,128 @@ var reorderAnalyticsEvents = global.reorderAnalyticsEvents || (async function (f
     [list[idx + 1], list[idx]] = [list[idx], list[idx + 1]];
   }
   for (let i = 0; i < list.length; i++) {
-/* removed stray top-level await */}
+    await pool.query('UPDATE analytics_events SET order_index=$1 WHERE id=$2', [i, list[i]]);
+  }
 });
 global.reorderAnalyticsEvents = reorderAnalyticsEvents;
-/* === END ANALYTICS_ADMIN_GLOBAL_HELPERS === *//* removed old global fix block *//* removed old global fix block */function pgNum(x) { const n = Number(x); return Number.isFinite(n) ? n : 0; }
+/* === END ANALYTICS_ADMIN_GLOBAL_HELPERS === *//* === ANALYTICS_ADMIN_GLOBAL_FIX_v2 === */
+var ensureAnalyticsConfigTables = global.ensureAnalyticsConfigTables || (async function() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS analytics_folders (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      slug TEXT,
+      enabled BOOLEAN DEFAULT TRUE,
+      order_index INT DEFAULT 0,
+      created_at TIMESTAMPTZ DEFAULT now()
+    );
+    CREATE TABLE IF NOT EXISTS analytics_events (
+      id SERIAL PRIMARY KEY,
+      folder_id INT REFERENCES analytics_folders(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      enabled BOOLEAN DEFAULT TRUE,
+      show_donation_detail BOOLEAN DEFAULT TRUE,
+      show_expense_detail BOOLEAN DEFAULT TRUE,
+      order_index INT DEFAULT 0,
+      created_at TIMESTAMPTZ DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_analytics_folders_order ON analytics_folders(order_index, lower(name));
+    CREATE INDEX IF NOT EXISTS idx_analytics_events_folder ON analytics_events(folder_id);
+    CREATE INDEX IF NOT EXISTS idx_analytics_events_order ON analytics_events(folder_id, order_index);
+  `);
+});
+global.ensureAnalyticsConfigTables = ensureAnalyticsConfigTables;
+
+var reorderAnalyticsFolders = global.reorderAnalyticsFolders || (async function(folderId, direction, newIndex) {
+  const { rows } = await pool.query('SELECT id FROM analytics_folders ORDER BY order_index ASC, lower(name) ASC');
+  let list = rows.map(r => r.id);
+  let idx = list.indexOf(Number(folderId));
+  if (idx === -1) return;
+  if (typeof newIndex === 'number' && Number.isFinite(newIndex)) {
+    const it = list.splice(idx,1)[0];
+    list.splice(Math.max(0, Math.min(newIndex, list.length)), 0, it);
+  } else if (direction === 'up' && idx > 0) {
+    [list[idx-1], list[idx]] = [list[idx], list[idx-1]];
+  } else if (direction === 'down' && idx < list.length - 1) {
+    [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
+  }
+  for (let i=0;i<list.length;i++) await pool.query('UPDATE analytics_folders SET order_index=$1 WHERE id=$2', [i, list[i]]);
+});
+global.reorderAnalyticsFolders = reorderAnalyticsFolders;
+
+var reorderAnalyticsEvents = global.reorderAnalyticsEvents || (async function(folderId, eventId, direction, newIndex) {
+  const { rows } = await pool.query('SELECT id FROM analytics_events WHERE folder_id=$1 ORDER BY order_index ASC, id ASC', [folderId]);
+  let list = rows.map(r => r.id);
+  let idx = list.indexOf(Number(eventId));
+  if (idx === -1) return;
+  if (typeof newIndex === 'number' && Number.isFinite(newIndex)) {
+    const it = list.splice(idx,1)[0];
+    list.splice(Math.max(0, Math.min(newIndex, list.length)), 0, it);
+  } else if (direction === 'up' && idx > 0) {
+    [list[idx-1], list[idx]] = [list[idx], list[idx-1]];
+  } else if (direction === 'down' && idx < list.length - 1) {
+    [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
+  }
+  for (let i=0;i<list.length;i++) await pool.query('UPDATE analytics_events SET order_index=$1 WHERE id=$2', [i, list[i]]);
+});
+global.reorderAnalyticsEvents = reorderAnalyticsEvents;
+/* === END ANALYTICS_ADMIN_GLOBAL_FIX_v2 === *//* === ANALYTICS_ADMIN_GLOBAL_FIX (defines globals right after Pool) === */
+global.ensureAnalyticsConfigTables = global.ensureAnalyticsConfigTables || (async function() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS analytics_folders (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      slug TEXT,
+      enabled BOOLEAN DEFAULT TRUE,
+      order_index INT DEFAULT 0,
+      created_at TIMESTAMPTZ DEFAULT now()
+    );
+    CREATE TABLE IF NOT EXISTS analytics_events (
+      id SERIAL PRIMARY KEY,
+      folder_id INT REFERENCES analytics_folders(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      enabled BOOLEAN DEFAULT TRUE,
+      show_donation_detail BOOLEAN DEFAULT TRUE,
+      show_expense_detail BOOLEAN DEFAULT TRUE,
+      order_index INT DEFAULT 0,
+      created_at TIMESTAMPTZ DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_analytics_folders_order ON analytics_folders(order_index, lower(name));
+    CREATE INDEX IF NOT EXISTS idx_analytics_events_folder ON analytics_events(folder_id);
+    CREATE INDEX IF NOT EXISTS idx_analytics_events_order ON analytics_events(folder_id, order_index);
+  `);
+});
+// removed dup const ensureAnalyticsConfigTables (using var/global)global.reorderAnalyticsFolders = global.reorderAnalyticsFolders || (async function(folderId, direction, newIndex) {
+  const { rows } = await pool.query('SELECT id FROM analytics_folders ORDER BY order_index ASC, lower(name) ASC');
+  let list = rows.map(r => r.id);
+  let idx = list.indexOf(Number(folderId));
+  if (idx === -1) return;
+  if (typeof newIndex === 'number' && Number.isFinite(newIndex)) {
+    const it = list.splice(idx,1)[0];
+    list.splice(Math.max(0, Math.min(newIndex, list.length)), 0, it);
+  } else if (direction === 'up' && idx > 0) {
+    [list[idx-1], list[idx]] = [list[idx], list[idx-1]];
+  } else if (direction === 'down' && idx < list.length - 1) {
+    [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
+  }
+  for (let i=0;i<list.length;i++) await pool.query('UPDATE analytics_folders SET order_index=$1 WHERE id=$2', [i, list[i]]);
+});
+// removed dup const reorderAnalyticsFolders (using var/global)global.reorderAnalyticsEvents = global.reorderAnalyticsEvents || (async function(folderId, eventId, direction, newIndex) {
+  const { rows } = await pool.query('SELECT id FROM analytics_events WHERE folder_id=$1 ORDER BY order_index ASC, id ASC', [folderId]);
+  let list = rows.map(r => r.id);
+  let idx = list.indexOf(Number(eventId));
+  if (idx === -1) return;
+  if (typeof newIndex === 'number' && Number.isFinite(newIndex)) {
+    const it = list.splice(idx,1)[0];
+    list.splice(Math.max(0, Math.min(newIndex, list.length)), 0, it);
+  } else if (direction === 'up' && idx > 0) {
+    [list[idx-1], list[idx]] = [list[idx], list[idx-1]];
+  } else if (direction === 'down' && idx < list.length - 1) {
+    [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
+  }
+  for (let i=0;i<list.length;i++) await pool.query('UPDATE analytics_events SET order_index=$1 WHERE id=$2', [i, list[i]]);
+});
+// removed dup const reorderAnalyticsEvents (using var/global)/* === END ANALYTICS_ADMIN_GLOBAL_FIX === */function pgNum(x) { const n = Number(x); return Number.isFinite(n) ? n : 0; }
 
 /* ===================== Cloudinary ===================== */
 cloudinary.config({
@@ -539,7 +591,8 @@ async function ensureCategoriesTable() {
       created_at TIMESTAMPTZ DEFAULT now()
     );
   `);
-/* removed stray top-level await */console.log('DB ready: categories');
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_categories_enabled ON categories (enabled);`);
+  console.log('DB ready: categories');
 }
 
 /* ===================== Categories (DB) + FE aliases ===================== */
@@ -552,7 +605,8 @@ const listCategoriesHandler = async (req, res) => {
     let sql = 'SELECT id, name, enabled, created_at FROM categories';
     if (!isAdmin && !includeDisabled) sql += ' WHERE enabled = true';
     sql += ' ORDER BY lower(name) ASC';
-/* removed stray top-level await */res.json(rows);
+    const { rows } = await pool.query(sql);
+    res.json(rows);
   } catch (e) { console.error('categories list error:', e); res.status(500).send('Failed to list categories'); }
 };
 const createCategoryHandler = async (req, res) => {
@@ -562,7 +616,8 @@ const createCategoryHandler = async (req, res) => {
     const nm = String(name || '').trim();
     if (!nm) return res.status(400).json({ error: 'name required' });
     const en = !(enabled === false || enabled === 'false' || enabled === 0 || enabled === '0');
-/* removed stray top-level await */res.status(201).json(rows[0]);
+    const { rows } = await pool.query('INSERT INTO categories (name, enabled) VALUES ($1,$2) RETURNING *', [nm, en]);
+    res.status(201).json(rows[0]);
   } catch (e) {
     if ((e.code || '').startsWith('23')) return res.status(409).json({ error: 'category already exists' });
     console.error('categories create error:', e); res.status(500).send('Create failed');
@@ -619,7 +674,8 @@ app.get('/api/expenses/list', authRole(['user','admin','mainadmin']), async (req
       let sql = 'SELECT * FROM expenses';
       if (where.length) sql += ' WHERE ' + where.join(' AND ');
       sql += ' ORDER BY COALESCE(date, created_at) DESC';
-/* removed stray top-level await */return res.json(rows.map(rowToExpense));
+      const { rows } = await pool.query(sql, values);
+      return res.json(rows.map(rowToExpense));
     } else {
       // approved+enabled
       let sql = `SELECT * FROM expenses WHERE approved = true AND enabled = true`;
@@ -723,7 +779,8 @@ app.put('/api/expenses/:id', authRole(['admin','mainadmin']), async (req, res) =
 
     fields.push(`updated_at = now()`);
     vals.push(id);
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'Expense not found' });
+    const { rows } = await pool.query(`UPDATE expenses SET ${fields.join(', ')} WHERE id=$${idx} RETURNING *`, vals);
+    if (!rows.length) return res.status(404).json({ error: 'Expense not found' });
     res.json({ message: 'Expense updated', expense: rowToExpense(rows[0]) });
   } catch (err) {
     console.error('update expense error:', err);
@@ -737,7 +794,8 @@ app.post('/api/expenses/:id/enable', authRole(['admin','mainadmin']), async (req
     const { id } = req.params;
     const enabledRaw = req.body.enabled;
     const enabled = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'Expense not found' });
+    const { rows } = await pool.query(`UPDATE expenses SET enabled=$1, updated_at=now() WHERE id=$2 RETURNING *`, [enabled, id]);
+    if (!rows.length) return res.status(404).json({ error: 'Expense not found' });
     res.json({ ok: true, expense: rowToExpense(rows[0]) });
   } catch (e) {
     console.error('enable expense error:', e);
@@ -780,7 +838,8 @@ app.delete('/api/expenses/:id', authRole(['admin','mainadmin']), async (req, res
   try {
     await ensureExpensesTable();
     const { id } = req.params;
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'Expense not found' });
+    const { rows } = await pool.query('DELETE FROM expenses WHERE id=$1 RETURNING *', [id]);
+    if (!rows.length) return res.status(404).json({ error: 'Expense not found' });
     res.json({ message: 'Expense deleted', expense: rowToExpense(rows[0]) });
   } catch (err) {
     console.error('delete expense error:', err);
@@ -796,7 +855,8 @@ const donationScreenshotStorage = new CloudinaryStorage({
 const uploadDonation = multer({ storage: donationScreenshotStorage, limits: { fileSize: 20 * 1024 * 1024 } });
 
 async function receiptCodeExists(code) {
-/* removed stray top-level await */return rows.length > 0;
+  const { rows } = await pool.query('SELECT 1 FROM donations WHERE upper(receipt_code) = upper($1) LIMIT 1', [code]);
+  return rows.length > 0;
 }
 async function generateUniqueReceiptCodeDB() {
   let code, tries=0;
@@ -896,7 +956,8 @@ app.get('/api/donations/donations', authRole(['user','admin','mainadmin']), asyn
       vals = [`%${q}%`];
     }
     sql += ' ORDER BY created_at DESC';
-/* removed stray top-level await */return res.json(rows.map(r => redactDonationForRole(rowToDonation(r), role)));
+    const { rows } = await pool.query(sql, vals);
+    return res.json(rows.map(r => redactDonationForRole(rowToDonation(r), role)));
   }
 
   // mine
@@ -910,7 +971,8 @@ app.get('/api/donations/donations', authRole(['user','admin','mainadmin']), asyn
                 OR lower(coalesce(category,'')) ILIKE lower($2))`;
     vals.push(`%${q}%`);
   }
-/* removed stray top-level await */res.json(rows.map(r => redactDonationForRole(rowToDonation(r), role)));
+  const { rows } = await pool.query(`SELECT * FROM donations ${where} ORDER BY created_at DESC`, vals);
+  res.json(rows.map(r => redactDonationForRole(rowToDonation(r), role)));
 });
 
 app.get('/api/donations/all-donations', authRole(['admin', 'mainadmin']), async (req, res) => {
@@ -927,7 +989,8 @@ app.get('/api/donations/all-donations', authRole(['admin', 'mainadmin']), async 
     vals = [`%${q}%`];
   }
   sql += ' ORDER BY created_at DESC';
-/* removed stray top-level await */res.json(rows.map(r => redactDonationForRole(rowToDonation(r), role)));
+  const { rows } = await pool.query(sql, vals);
+  res.json(rows.map(r => redactDonationForRole(rowToDonation(r), role)));
 });
 
 app.get('/api/donations/search', authRole(['user','admin','mainadmin']), async (req, res) => {
@@ -962,7 +1025,8 @@ app.get('/api/donations/search', authRole(['user','admin','mainadmin']), async (
              ORDER BY created_at DESC LIMIT 100`;
       vals = [like, req.user.username];
     }
-/* removed stray top-level await */res.json(rows.map(r => redactDonationForRole(rowToDonation(r), role)));
+    const { rows } = await pool.query(sql, vals);
+    res.json(rows.map(r => redactDonationForRole(rowToDonation(r), role)));
   } catch (e) {
     console.error('donation search error:', e);
     res.status(500).send('Search failed');
@@ -971,7 +1035,8 @@ app.get('/api/donations/search', authRole(['user','admin','mainadmin']), async (
 
 app.get('/admin/donations/pending', authRole(['admin', 'mainadmin']), async (req, res) => {
   await ensureDonationsTable();
-/* removed stray top-level await */res.json(rows.map(rowToDonation));
+  const { rows } = await pool.query(`SELECT * FROM donations WHERE approved = false ORDER BY created_at DESC`);
+  res.json(rows.map(rowToDonation));
 });
 
 app.post('/admin/donations/:id/approve', authRole(['admin', 'mainadmin']), async (req, res) => {
@@ -1079,7 +1144,8 @@ async function handleDonationUpdate(req, res) {
 
     fields.push(`updated_at = now()`);
     vals.push(id);
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'Donation not found' });
+    const { rows } = await pool.query(`UPDATE donations SET ${fields.join(', ')} WHERE id=$${idx} RETURNING *`, vals);
+    if (!rows.length) return res.status(404).json({ error: 'Donation not found' });
     res.json({ message: 'Donation updated', donation: rowToDonation(rows[0]) });
   } catch (e) {
     console.error('update donation error:', e);
@@ -1125,7 +1191,8 @@ async function ensureGalleryFolder(slug, name) {
 }
 
 async function reorderGalleryImages(folderSlug, targetIdOrName, direction, newIndex) {
-/* removed stray top-level await */let list = rows.map(r => ({ id: r.id, name: r.filename }));
+  const { rows } = await pool.query('SELECT id, filename FROM gallery_images WHERE folder_slug=$1 ORDER BY order_index ASC, lower(filename) ASC', [folderSlug]);
+  let list = rows.map(r => ({ id: r.id, name: r.filename }));
   let idx = list.findIndex(x => String(x.id) === String(targetIdOrName) || String(x.name) === String(targetIdOrName));
   if (idx === -1) return;
 
@@ -1138,11 +1205,13 @@ async function reorderGalleryImages(folderSlug, targetIdOrName, direction, newIn
     [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
   }
   for (let i=0;i<list.length;i++) {
-/* removed stray top-level await */}
+    await pool.query('UPDATE gallery_images SET order_index=$1 WHERE id=$2', [i, list[i].id]);
+  }
 }
 
 async function reorderGalleryFolders(slug, direction, newIndex) {
-/* removed stray top-level await */let list = rows.map(r => r.slug);
+  const { rows } = await pool.query('SELECT slug FROM gallery_folders ORDER BY order_index ASC, lower(name) ASC');
+  let list = rows.map(r => r.slug);
   let idx = list.indexOf(slug);
   if (idx === -1) return;
   if (typeof newIndex === 'number' && Number.isFinite(newIndex)) {
@@ -1154,7 +1223,8 @@ async function reorderGalleryFolders(slug, direction, newIndex) {
     [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
   }
   for (let i=0;i<list.length;i++) {
-/* removed stray top-level await */}
+    await pool.query('UPDATE gallery_folders SET order_index=$1 WHERE slug=$2', [i, list[i]]);
+  }
 }
 
 // List folders
@@ -1168,7 +1238,8 @@ app.get('/gallery/folders', authRole(['user', 'admin', 'mainadmin']), async (req
     let sql = 'SELECT slug, name, enabled, order_index, cover_url, icon_public_id, icon_key FROM gallery_folders';
     if (!isAdmin && !includeDisabled) sql += ' WHERE enabled = true';
     sql += ' ORDER BY order_index ASC, lower(name) ASC';
-/* removed stray top-level await */const foldersOut = rows.map(r => ({
+    const { rows } = await pool.query(sql);
+    const foldersOut = rows.map(r => ({
       name: r.name,
       slug: r.slug,
       url: null,
@@ -1227,7 +1298,8 @@ async function listRootGalleryImages(req, res) {
     const vals = ['_root'];
     if (!isAdmin && !includeDisabled) sql += ' AND enabled = true';
     sql += ' ORDER BY order_index ASC, lower(filename) ASC';
-/* removed stray top-level await */res.json(rows.map(r => ({
+    const { rows } = await pool.query(sql, vals);
+    res.json(rows.map(r => ({
       name: r.filename,
       url: r.url,
       size: null,
@@ -1300,7 +1372,9 @@ app.get('/gallery/folders/:slug/images', authRole(['user', 'admin', 'mainadmin']
       sql += ' AND enabled = true';
     }
     sql += ' ORDER BY order_index ASC, lower(filename) ASC';
-/* removed stray top-level await */res.json(rows.map(r => ({
+    const { rows } = await pool.query(sql, vals);
+
+    res.json(rows.map(r => ({
       id: r.id,
       name: r.filename,
       url: r.url,
@@ -1320,7 +1394,8 @@ app.post('/gallery/folders/:slug/enable', authRole(['admin', 'mainadmin']), asyn
     const { slug } = req.params;
     const enabledRaw = req.body.enabled;
     const enabled = enabledRaw !== false && enabledRaw !== 'false' && enabledRaw !== 0 && enabledRaw !== '0';
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'folder not found' });
+    const { rows } = await pool.query('UPDATE gallery_folders SET enabled=$1 WHERE slug=$2 RETURNING slug, name, enabled', [enabled, slug]);
+    if (!rows.length) return res.status(404).json({ error: 'folder not found' });
     res.json({ ok: true, slug, enabled: rows[0].enabled });
   } catch (e) {
     console.error('enable folder error:', e);
@@ -1335,7 +1410,8 @@ app.post('/gallery/folders/reorder', authRole(['admin', 'mainadmin']), async (re
     const { slug, direction, newIndex } = req.body || {};
     if (!slug) return res.status(400).json({ error: 'slug required' });
     await reorderGalleryFolders(slug, direction, typeof newIndex === 'number' ? newIndex : undefined);
-/* removed stray top-level await */res.json({ ok: true, folderOrder: rows.map(r => r.slug) });
+    const { rows } = await pool.query('SELECT slug FROM gallery_folders ORDER BY order_index ASC, lower(name) ASC');
+    res.json({ ok: true, folderOrder: rows.map(r => r.slug) });
   } catch (e) {
     console.error('reorder folders error:', e);
     res.status(500).send('Failed to reorder folders');
@@ -1347,7 +1423,8 @@ app.post('/gallery/folders/:slug/reorder', authRole(['admin', 'mainadmin']), asy
     const { slug } = req.params;
     const { direction, newIndex } = req.body || {};
     await reorderGalleryFolders(slug, direction, typeof newIndex === 'number' ? newIndex : undefined);
-/* removed stray top-level await */res.json({ ok: true, folderOrder: rows.map(r => r.slug) });
+    const { rows } = await pool.query('SELECT slug FROM gallery_folders ORDER BY order_index ASC, lower(name) ASC');
+    res.json({ ok: true, folderOrder: rows.map(r => r.slug) });
   } catch (e) {
     console.error('reorder folders (param) error:', e);
     res.status(500).send('Failed to reorder folders');
@@ -1370,12 +1447,16 @@ app.post('/gallery/folders/:slug/rename', authRole(['admin', 'mainadmin']), asyn
 
     const { rows: dup } = await pool.query('SELECT 1 FROM gallery_folders WHERE slug=$1', [newSlug]);
     if (dup.length && newSlug !== slug) return res.status(409).json({ error: 'target exists', slug: newSlug });
-/* removed stray top-level await */await pool.query('UPDATE gallery_images SET folder_slug=$1 WHERE folder_slug=$2', [newSlug, slug]);
-/* removed stray top-level await */await pool.query('COMMIT');
+
+    await pool.query('BEGIN');
+    await pool.query('UPDATE gallery_images SET folder_slug=$1 WHERE folder_slug=$2', [newSlug, slug]);
+    await pool.query('UPDATE gallery_folders SET slug=$1, name=$2 WHERE slug=$3', [newSlug, desired, slug]);
+    await pool.query('COMMIT');
 
     res.json({ ok: true, slug: newSlug, name: desired });
   } catch (e) {
-/* removed stray top-level await */console.error('rename folder error:', e);
+    await pool.query('ROLLBACK').catch(()=>{});
+    console.error('rename folder error:', e);
     res.status(500).send('Failed to rename folder');
   }
 });
@@ -1413,7 +1494,8 @@ app.post('/gallery/folders/:slug/images/reorder', authRole(['admin', 'mainadmin'
     const target = id || filename;
     if (!target) return res.status(400).json({ error: 'id or filename required' });
     await reorderGalleryImages(slug, target, direction, typeof newIndex === 'number' ? newIndex : undefined);
-/* removed stray top-level await */res.json({ ok: true, imageOrder: rows.map(r => r.filename) });
+    const { rows } = await pool.query('SELECT filename FROM gallery_images WHERE folder_slug=$1 ORDER BY order_index ASC, lower(filename) ASC', [slug]);
+    res.json({ ok: true, imageOrder: rows.map(r => r.filename) });
   } catch (e) {
     console.error('reorder images error:', e);
     res.status(500).send('Failed to reorder images');
@@ -1432,7 +1514,8 @@ app.post('/gallery/folders/:slug/images/enable', authRole(['admin', 'mainadmin']
 
     const cond = id ? 'id=$1 AND folder_slug=$2' : 'filename=$1 AND folder_slug=$2';
     const vals = id ? [id, slug] : [String(filename), slug];
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'image not found' });
+    const { rows } = await pool.query(`UPDATE gallery_images SET enabled=$3 WHERE ${cond} RETURNING *`, [...vals, enabled]);
+    if (!rows.length) return res.status(404).json({ error: 'image not found' });
     res.json({ ok: true, filename: rows[0].filename, enabled: rows[0].enabled });
   } catch (e) {
     console.error('enable image error:', e);
@@ -1450,10 +1533,12 @@ app.post('/gallery/folders/:slug/images/rename', authRole(['admin', 'mainadmin']
 
     let row = null;
     if (id) {
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'image not found' });
+      const { rows } = await pool.query('SELECT * FROM gallery_images WHERE id=$1 AND folder_slug=$2', [id, slug]);
+      if (!rows.length) return res.status(404).json({ error: 'image not found' });
       row = rows[0];
     } else if (filename) {
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'image not found' });
+      const { rows } = await pool.query('SELECT * FROM gallery_images WHERE filename=$1 AND folder_slug=$2', [filename, slug]);
+      if (!rows.length) return res.status(404).json({ error: 'image not found' });
       row = rows[0];
     } else return res.status(400).json({ error: 'id or filename required' });
 
@@ -1487,15 +1572,19 @@ app.delete('/gallery/folders/:slug/images', authRole(['admin', 'mainadmin']), as
 
     let row = null;
     if (id) {
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'image not found' });
+      const { rows } = await pool.query('SELECT * FROM gallery_images WHERE id=$1 AND folder_slug=$2', [id, slug]);
+      if (!rows.length) return res.status(404).json({ error: 'image not found' });
       row = rows[0];
     } else {
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'image not found' });
+      const { rows } = await pool.query('SELECT * FROM gallery_images WHERE filename=$1 AND folder_slug=$2', [filename, slug]);
+      if (!rows.length) return res.status(404).json({ error: 'image not found' });
       row = rows[0];
     }
 
     try { await cloudinary.uploader.destroy(row.public_id, { resource_type: 'image' }); } catch (e) { console.warn('cloud delete failed', e.message); }
-/* removed stray top-level await */res.json({ ok: true, filename: row.filename });
+    await pool.query('DELETE FROM gallery_images WHERE id=$1', [row.id]);
+
+    res.json({ ok: true, filename: row.filename });
   } catch (e) {
     console.error('delete image error:', e);
     res.status(500).send('Failed to delete file');
@@ -1512,10 +1601,12 @@ app.post('/gallery/folders/:slug/cover', authRole(['admin', 'mainadmin']), async
 
     const cond = id ? 'id=$1 AND folder_slug=$2' : 'filename=$1 AND folder_slug=$2';
     const vals = id ? [id, slug] : [String(filename), slug];
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'image not found' });
+    const { rows } = await pool.query(`SELECT * FROM gallery_images WHERE ${cond}`, vals);
+    if (!rows.length) return res.status(404).json({ error: 'image not found' });
 
     const img = rows[0];
-/* removed stray top-level await */res.json({ ok: true, slug, cover: img.filename, coverUrl: img.url });
+    await pool.query('UPDATE gallery_folders SET cover_public_id=$1, cover_url=$2 WHERE slug=$3', [img.public_id, img.url, slug]);
+    res.json({ ok: true, slug, cover: img.filename, coverUrl: img.url });
   } catch (e) {
     console.error('set cover error:', e);
     res.status(500).send('Failed to set cover');
@@ -1530,24 +1621,30 @@ app.post('/gallery/folders/:slug/icon', authRole(['admin', 'mainadmin']), async 
     const { filename, imageId, iconKey, clear } = req.body || {};
 
     if (clear === true || clear === 'true' || clear === 1 || clear === '1') {
-/* removed stray top-level await */return res.json({ ok: true, slug, iconFile: null, iconKey: null, iconUrl: null });
+      await pool.query('UPDATE gallery_folders SET icon_public_id=NULL, icon_key=NULL WHERE slug=$1', [slug]);
+      return res.json({ ok: true, slug, iconFile: null, iconKey: null, iconUrl: null });
     }
 
     if (iconKey && String(iconKey).trim()) {
       const key = String(iconKey).trim();
       if (!ALLOWED_ICON_KEYS.has(key)) return res.status(400).json({ error: 'Invalid iconKey', allowed: Array.from(ALLOWED_ICON_KEYS) });
-/* removed stray top-level await */return res.json({ ok: true, slug, iconFile: null, iconKey: key, iconUrl: null });
+      await pool.query('UPDATE gallery_folders SET icon_public_id=NULL, icon_key=$1 WHERE slug=$2', [key, slug]);
+      return res.json({ ok: true, slug, iconFile: null, iconKey: key, iconUrl: null });
     }
 
     let row = null;
     if (imageId) {
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'image not found' });
+      const { rows } = await pool.query('SELECT * FROM gallery_images WHERE id=$1 AND folder_slug=$2', [imageId, slug]);
+      if (!rows.length) return res.status(404).json({ error: 'image not found' });
       row = rows[0];
     } else if (filename) {
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'image not found' });
+      const { rows } = await pool.query('SELECT * FROM gallery_images WHERE filename=$1 AND folder_slug=$2', [filename, slug]);
+      if (!rows.length) return res.status(404).json({ error: 'image not found' });
       row = rows[0];
     } else return res.status(400).json({ error: 'Provide imageId OR filename OR iconKey OR clear=true' });
-/* removed stray top-level await */return res.json({ ok: true, slug, iconFile: row.filename, iconKey: null, iconUrl: row.url });
+
+    await pool.query('UPDATE gallery_folders SET icon_public_id=$1, icon_key=NULL WHERE slug=$2', [row.public_id, slug]);
+    return res.json({ ok: true, slug, iconFile: row.filename, iconKey: null, iconUrl: row.url });
   } catch (e) {
     console.error('set icon error:', e);
     res.status(500).send('Failed to set icon');
@@ -1583,7 +1680,8 @@ app.get('/ebooks/folders', authRole(['user','admin','mainadmin']), async (req, r
     let sql = 'SELECT slug, name, enabled FROM ebook_folders';
     if (!isAdmin && !includeDisabled) sql += ' WHERE enabled = true';
     sql += ' ORDER BY lower(name) ASC';
-/* removed stray top-level await */const out = [];
+    const { rows } = await pool.query(sql);
+    const out = [];
     for (const f of rows) {
       const { rows: cnt } = await pool.query('SELECT COUNT(*)::int AS c FROM ebook_files WHERE folder_slug=$1', [f.slug]);
       out.push({
@@ -1610,7 +1708,8 @@ app.get('/ebooks/files', authRole(['user','admin','mainadmin']), async (req, res
     let sql = 'SELECT id, filename, url, enabled, order_index, uploaded_at FROM ebook_files WHERE folder_slug IS NULL';
     if (!isAdmin && !includeDisabled) sql += ' AND enabled = true';
     sql += ' ORDER BY order_index ASC, lower(filename) ASC';
-/* removed stray top-level await */res.json(rows);
+    const { rows } = await pool.query(sql);
+    res.json(rows);
   } catch (e) {
     console.error('ebooks root files error:', e);
     res.status(500).send('Failed to list e-books');
@@ -1629,7 +1728,8 @@ app.get('/ebooks/folders/:slug/files', authRole(['user','admin','mainadmin']), a
     const vals=[slug];
     if (!isAdmin && !includeDisabled) sql += ' AND enabled = true';
     sql += ' ORDER BY order_index ASC, lower(filename) ASC';
-/* removed stray top-level await */res.json(rows);
+    const { rows } = await pool.query(sql, vals);
+    res.json(rows);
   } catch (e) {
     console.error('ebooks folder files error:', e);
     res.status(500).send('Failed to list e-books in folder');
@@ -1642,7 +1742,8 @@ app.post('/ebooks/folders/create', authRole(['admin','mainadmin']), async (req, 
     const { name } = req.body || {};
     if (!name || !String(name).trim()) return res.status(400).json({ error: 'name is required' });
     const slug = slugify(String(name));
-/* removed stray top-level await */res.status(201).json({ name: String(name).trim(), slug });
+    await pool.query('INSERT INTO ebook_folders (slug, name, enabled) VALUES ($1,$2,true)', [slug, String(name).trim()]);
+    res.status(201).json({ name: String(name).trim(), slug });
   } catch (e) {
     if (String(e.message || '').toLowerCase().includes('duplicate')) return res.status(409).json({ error: 'folder already exists' });
     console.error('ebooks create folder error:', e);
@@ -1663,12 +1764,16 @@ app.post('/ebooks/folders/:slug/rename', authRole(['admin','mainadmin']), async 
     if (!exists.length) return res.status(404).json({ error: 'folder not found' });
     const { rows: dup } = await pool.query('SELECT 1 FROM ebook_folders WHERE slug=$1', [newSlug]);
     if (dup.length && newSlug !== slug) return res.status(409).json({ error: 'target exists', slug: newSlug });
-/* removed stray top-level await */await pool.query('UPDATE ebook_files SET folder_slug=$1 WHERE folder_slug=$2', [newSlug, slug]);
-/* removed stray top-level await */await pool.query('COMMIT');
+
+    await pool.query('BEGIN');
+    await pool.query('UPDATE ebook_files SET folder_slug=$1 WHERE folder_slug=$2', [newSlug, slug]);
+    await pool.query('UPDATE ebook_folders SET slug=$1, name=$2 WHERE slug=$3', [newSlug, desired, slug]);
+    await pool.query('COMMIT');
 
     res.json({ ok: true, slug: newSlug, name: desired });
   } catch (e) {
-/* removed stray top-level await */console.error('ebooks rename folder error:', e);
+    await pool.query('ROLLBACK').catch(()=>{});
+    console.error('ebooks rename folder error:', e);
     res.status(500).send('Failed to rename folder');
   }
 });
@@ -1679,7 +1784,8 @@ app.post('/ebooks/folders/:slug/enable', authRole(['admin','mainadmin']), async 
     const { slug } = req.params;
     const enabledRaw = req.body.enabled;
     const enabled = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'folder not found' });
+    const { rows } = await pool.query('UPDATE ebook_folders SET enabled=$1 WHERE slug=$2 RETURNING *', [enabled, slug]);
+    if (!rows.length) return res.status(404).json({ error: 'folder not found' });
     res.json({ ok: true, slug, enabled: rows[0].enabled });
   } catch (e) {
     console.error('ebooks enable folder error:', e);
@@ -1736,7 +1842,8 @@ app.post('/ebooks/folders/:slug/upload', authRole(['admin','mainadmin']), upload
   try {
     await ensureEbooksTables();
     const { slug } = req.params;
-/* removed stray top-level await */const files = req.files || [];
+    await pool.query(`INSERT INTO ebook_folders (slug,name,enabled) VALUES ($1,$1,true) ON CONFLICT (slug) DO NOTHING`, [slug]);
+    const files = req.files || [];
     if (!files.length) return res.status(400).json({ error: 'No files uploaded' });
 
     const { rows: r0 } = await pool.query('SELECT COALESCE(MAX(order_index), -1) AS m FROM ebook_files WHERE folder_slug=$1',[slug]);
@@ -1764,12 +1871,14 @@ app.post('/ebooks/files/rename', authRole(['admin','mainadmin']), async (req, re
 
     let row = null;
     if (id) {
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'file not found' });
+      const { rows } = await pool.query('SELECT * FROM ebook_files WHERE id=$1', [id]);
+      if (!rows.length) return res.status(404).json({ error: 'file not found' });
       row = rows[0];
     } else if (filename) {
       const cond = folderSlug ? 'filename=$1 AND folder_slug=$2' : 'filename=$1 AND folder_slug IS NULL';
       const vals = folderSlug ? [filename, folderSlug] : [filename];
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'file not found' });
+      const { rows } = await pool.query(`SELECT * FROM ebook_files WHERE ${cond}`, vals);
+      if (!rows.length) return res.status(404).json({ error: 'file not found' });
       row = rows[0];
     } else return res.status(400).json({ error: 'id or filename required' });
 
@@ -1800,12 +1909,14 @@ app.post('/ebooks/files/enable', authRole(['admin','mainadmin']), async (req, re
     let row = null;
 
     if (id) {
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'file not found' });
+      const { rows } = await pool.query('UPDATE ebook_files SET enabled=$1 WHERE id=$2 RETURNING *', [enabled, id]);
+      if (!rows.length) return res.status(404).json({ error: 'file not found' });
       row = rows[0];
     } else if (filename) {
       const cond = folderSlug ? 'filename=$1 AND folder_slug=$2' : 'filename=$1 AND folder_slug IS NULL';
       const vals = folderSlug ? [filename, folderSlug] : [filename];
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'file not found' });
+      const { rows } = await pool.query(`UPDATE ebook_files SET enabled=$3 WHERE ${cond} RETURNING *`, [...vals, enabled]);
+      if (!rows.length) return res.status(404).json({ error: 'file not found' });
       row = rows[0];
     } else return res.status(400).json({ error: 'id or filename required' });
 
@@ -1825,17 +1936,21 @@ app.delete('/ebooks/files', authRole(['admin','mainadmin']), async (req, res) =>
 
     let row = null;
     if (id) {
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'file not found' });
+      const { rows } = await pool.query('SELECT * FROM ebook_files WHERE id=$1', [id]);
+      if (!rows.length) return res.status(404).json({ error: 'file not found' });
       row = rows[0];
     } else if (filename) {
       const cond = folderSlug ? 'filename=$1 AND folder_slug=$2' : 'filename=$1 AND folder_slug IS NULL';
       const vals = folderSlug ? [filename, folderSlug] : [filename];
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'file not found' });
+      const { rows } = await pool.query(`SELECT * FROM ebook_files WHERE ${cond}`, vals);
+      if (!rows.length) return res.status(404).json({ error: 'file not found' });
       row = rows[0];
     } else return res.status(400).json({ error: 'id or filename required' });
 
     try { await cloudinary.uploader.destroy(row.public_id, { resource_type: 'raw' }); } catch (e) { console.warn('cloud delete failed', e.message); }
-/* removed stray top-level await */res.json({ ok: true, filename: row.filename });
+    await pool.query('DELETE FROM ebook_files WHERE id=$1', [row.id]);
+
+    res.json({ ok: true, filename: row.filename });
   } catch (e) {
     console.error('ebooks root delete error:', e);
     res.status(500).send('Failed to delete file');
@@ -1846,7 +1961,8 @@ app.delete('/ebooks/files', authRole(['admin','mainadmin']), async (req, res) =>
 async function reorderEbookFiles(folderSlug, targetIdOrName, direction, newIndex) {
   const cond = folderSlug ? 'folder_slug=$1' : 'folder_slug IS NULL';
   const vals = folderSlug ? [folderSlug] : [];
-/* removed stray top-level await */let list = rows.map(r => ({ id: r.id, name: r.filename }));
+  const { rows } = await pool.query(`SELECT id, filename FROM ebook_files WHERE ${cond} ORDER BY order_index ASC, lower(filename) ASC`, vals);
+  let list = rows.map(r => ({ id: r.id, name: r.filename }));
   let idx = list.findIndex(x => String(x.id) === String(targetIdOrName) || String(x.name) === String(targetIdOrName));
   if (idx === -1) return;
   if (typeof newIndex === 'number' && Number.isFinite(newIndex)) {
@@ -1858,7 +1974,8 @@ async function reorderEbookFiles(folderSlug, targetIdOrName, direction, newIndex
     [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
   }
   for (let i=0;i<list.length;i++) {
-/* removed stray top-level await */}
+    await pool.query('UPDATE ebook_files SET order_index=$1 WHERE id=$2', [i, list[i].id]);
+  }
 }
 
 app.post('/ebooks/files/reorder', authRole(['admin','mainadmin']), async (req, res) => {
@@ -1871,7 +1988,8 @@ app.post('/ebooks/files/reorder', authRole(['admin','mainadmin']), async (req, r
 
     const cond = folderSlug ? 'folder_slug=$1' : 'folder_slug IS NULL';
     const vals = folderSlug ? [folderSlug] : [];
-/* removed stray top-level await */res.json({ ok: true, order: rows.map(r => r.filename) });
+    const { rows } = await pool.query(`SELECT filename FROM ebook_files WHERE ${cond} ORDER BY order_index ASC, lower(filename) ASC`, vals);
+    res.json({ ok: true, order: rows.map(r => r.filename) });
   } catch (e) {
     console.error('ebooks reorder error:', e);
     res.status(500).send('Failed to reorder');
@@ -1933,7 +2051,8 @@ app.get('/debug/donations', async (req, res) => {
 app.get('/debug/expenses', async (req, res) => {
   try {
     await ensureExpensesTable();
-/* removed stray top-level await */res.json({ count: rows.length, sample: rows.map(rowToExpense) });
+    const { rows } = await pool.query('SELECT * FROM expenses ORDER BY id DESC LIMIT 10');
+    res.json({ count: rows.length, sample: rows.map(rowToExpense) });
   } catch (e) {
     res.status(500).json({ error: 'debug failed' });
   }
@@ -2064,7 +2183,8 @@ app.put('/analytics/admin/folders/:id', authRole(['admin','mainadmin']), async (
     if (enabled !== undefined) { fields.push(`enabled=$${i++}`); vals.push(!(enabled===false||enabled==='false'||enabled===0||enabled==='0')); }
     if (!fields.length) return res.status(400).json({ error: 'No changes' });
     vals.push(id);
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    const { rows } = await pool.query(`UPDATE analytics_folders SET ${fields.join(', ')} WHERE id=$${i} RETURNING *`, vals);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
     res.json(rows[0]);
   } catch (e){ 
     if ((e.code||'').startsWith('23')) return res.status(409).json({ error: 'duplicate slug/name' });
@@ -2088,7 +2208,8 @@ app.post('/analytics/admin/folders/reorder', authRole(['admin','mainadmin']), as
     const { folderId, direction, newIndex } = req.body || {};
     if (!folderId) return res.status(400).json({ error: 'folderId required' });
     await reorderAnalyticsFolders(Number(folderId), direction, typeof newIndex==='number'?newIndex:undefined);
-/* removed stray top-level await */res.json({ ok:true, order: rows.map(r=>r.id) });
+    const { rows } = await pool.query('SELECT id FROM analytics_folders ORDER BY order_index ASC, lower(name) ASC');
+    res.json({ ok:true, order: rows.map(r=>r.id) });
   } catch (e){ console.error(e); res.status(500).send('Reorder failed'); }
 });
 
@@ -2124,7 +2245,8 @@ app.put('/analytics/admin/events/:id', authRole(['admin','mainadmin']), async (r
     if (showExpenseDetail !== undefined) { fields.push(`show_expense_detail=$${i++}`); vals.push(!(showExpenseDetail===false||showExpenseDetail==='false')); }
     if (!fields.length) return res.status(400).json({ error: 'No changes' });
     vals.push(id);
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    const { rows } = await pool.query(`UPDATE analytics_events SET ${fields.join(', ')} WHERE id=$${i} RETURNING *`, vals);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
     res.json(rows[0]);
   } catch (e){ console.error(e); res.status(500).send('Update event failed'); }
 });
@@ -2145,7 +2267,8 @@ app.post('/analytics/admin/events/reorder', authRole(['admin','mainadmin']), asy
     const { folderId, eventId, direction, newIndex } = req.body || {};
     if (!folderId || !eventId) return res.status(400).json({ error: 'folderId and eventId required' });
     await reorderAnalyticsEvents(Number(folderId), Number(eventId), direction, typeof newIndex==='number'?newIndex:undefined);
-/* removed stray top-level await */res.json({ ok:true, order: rows.map(r=>r.id) });
+    const { rows } = await pool.query('SELECT id FROM analytics_events WHERE folder_id=$1 ORDER BY order_index ASC, id ASC', [folderId]);
+    res.json({ ok:true, order: rows.map(r=>r.id) });
   } catch (e){ console.error(e); res.status(500).send('Reorder failed'); }
 });
 /* === End Injected: Analytics Admin (DB-based) === */
@@ -2245,7 +2368,8 @@ async function updateFolderHandler(req,res){
     if (enabled !== undefined) { fields.push(`enabled=$${i++}`); vals.push(!(enabled===false||enabled==='false'||enabled===0||enabled==='0')); }
     if (!fields.length) return res.status(400).json({ error: 'No changes' });
     vals.push(id);
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    const { rows } = await pool.query(`UPDATE analytics_folders SET ${fields.join(', ')} WHERE id=$${i} RETURNING *`, vals);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
     res.json(rows[0]);
   }catch(e){
     if ((e.code||'').startsWith('23')) return res.status(409).json({ error: 'duplicate slug/name' });
@@ -2257,7 +2381,8 @@ async function enableFolderHandler(req,res){
     const { id } = req.params;
     const enRaw = req.body?.enabled;
     const en = !(enRaw===false || enRaw==='false' || enRaw===0 || enRaw==='0');
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    const { rows } = await pool.query('UPDATE analytics_folders SET enabled=$1 WHERE id=$2 RETURNING *', [en, id]);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
     res.json({ ok:true, id: rows[0].id, enabled: rows[0].enabled });
   }catch(e){ console.error('enable folder err:', e); res.status(500).send('Enable folder failed'); }
 }
@@ -2314,7 +2439,8 @@ async function updateEventHandler(req,res){
     if (showExpenseDetail !== undefined) { fields.push(`show_expense_detail=$${i++}`); vals.push(!(showExpenseDetail===false||showExpenseDetail==='false')); }
     if (!fields.length) return res.status(400).json({ error: 'No changes' });
     vals.push(id);
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    const { rows } = await pool.query(`UPDATE analytics_events SET ${fields.join(', ')} WHERE id=$${i} RETURNING *`, vals);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
     res.json(rows[0]);
   }catch(e){ console.error('update event err:', e); res.status(500).send('Update event failed'); }
 }
@@ -2323,7 +2449,8 @@ async function enableEventHandler(req,res){
     const { id } = req.params;
     const enRaw = req.body?.enabled;
     const en = !(enRaw===false || enRaw==='false' || enRaw===0 || enRaw==='0');
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    const { rows } = await pool.query('UPDATE analytics_events SET enabled=$1 WHERE id=$2 RETURNING *', [en, id]);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
     res.json({ ok:true, id: rows[0].id, enabled: rows[0].enabled });
   }catch(e){ console.error('enable event err:', e); res.status(500).send('Enable event failed'); }
 }
@@ -2356,7 +2483,8 @@ app.post('/analytics/admin/folders/reorder', authRole(['admin','mainadmin']), as
     const { folderId, direction, newIndex } = req.body || {};
     if (!folderId) return res.status(400).json({ error: 'folderId required' });
     await reorderAnalyticsFolders(Number(folderId), direction, typeof newIndex==='number'?newIndex:undefined);
-/* removed stray top-level await */res.json({ ok:true, order: rows.map(r=>r.id) });
+    const { rows } = await pool.query('SELECT id FROM analytics_folders ORDER BY order_index ASC, lower(name) ASC');
+    res.json({ ok:true, order: rows.map(r=>r.id) });
   }catch(e){ console.error('reorder folder err:', e); res.status(500).send('Reorder failed'); }
 });
 
@@ -2467,7 +2595,8 @@ app.post('/analytics/admin/folders', authRole(['admin','mainadmin']), async (req
 
     // auto-suffix if slug exists
     for (let i=2;i<100;i++) {
-/* removed stray top-level await */if (!rows.length) break;
+      const { rows } = await pool.query('SELECT 1 FROM analytics_folders WHERE slug=$1 LIMIT 1', [slug]);
+      if (!rows.length) break;
       slug = `${safeSlug(nm)}-${i}`;
     }
 
@@ -2500,7 +2629,8 @@ app.put('/analytics/admin/folders/:id', authRole(['admin','mainadmin']), async (
     if (enabled !== undefined) { fields.push(\`enabled=$\${i++}\`); vals.push(normBool(enabled)); }
     if (!fields.length) return res.status(400).json({ error: 'No changes' });
     vals.push(id);
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    const { rows } = await pool.query(\`UPDATE analytics_folders SET \${fields.join(', ')} WHERE id=$\${i} RETURNING *\`, vals);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
     res.json(rows[0]);
   } catch (e){ console.error('update folder err:', e); if((e.code||'').startsWith('23')) return res.status(409).json({ error:'constraint', code:e.code, constraint:e.constraint, detail:e.detail }); res.status(500).send('Update folder failed'); }
 });
@@ -2510,7 +2640,8 @@ app.post('/analytics/admin/folders/:id/enable', authRole(['admin','mainadmin']),
   try {
     const { id } = req.params;
     const en = normBool(req.body?.enabled);
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    const { rows } = await pool.query('UPDATE analytics_folders SET enabled=$1 WHERE id=$2 RETURNING *', [en, id]);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
     res.json({ ok:true, id: rows[0].id, enabled: rows[0].enabled });
   } catch (e){ console.error('enable folder err:', e); res.status(500).send('Enable folder failed'); }
 });
@@ -2531,7 +2662,8 @@ app.post('/analytics/admin/folders/reorder', authRole(['admin','mainadmin']), as
     const { folderId, direction, newIndex } = req.body || {};
     if (!folderId) return res.status(400).json({ error: 'folderId required' });
     await reorderAnalyticsFolders(Number(folderId), direction, typeof newIndex==='number'?newIndex:undefined);
-/* removed stray top-level await */res.json({ ok:true, order: rows.map(r=>r.id) });
+    const { rows } = await pool.query('SELECT id FROM analytics_folders ORDER BY order_index ASC, lower(name) ASC');
+    res.json({ ok:true, order: rows.map(r=>r.id) });
   } catch (e){ console.error('reorder folder err:', e); res.status(500).send('Reorder failed'); }
 });
 
@@ -2580,7 +2712,8 @@ app.put('/analytics/admin/events/:id', authRole(['admin','mainadmin']), async (r
     if (showExpenseDetail !== undefined) { fields.push(\`show_expense_detail=$\${i++}\`); vals.push(normBool(showExpenseDetail)); }
     if (!fields.length) return res.status(400).json({ error: 'No changes' });
     vals.push(id);
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    const { rows } = await pool.query(\`UPDATE analytics_events SET \${fields.join(', ')} WHERE id=$\${i} RETURNING *\`, vals);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
     res.json(rows[0]);
   } catch (e){ console.error('update event err:', e); if((e.code||'').startsWith('23')) return res.status(409).json({ error:'constraint', code:e.code, constraint:e.constraint, detail:e.detail }); res.status(500).send('Update event failed'); }
 });
@@ -2590,7 +2723,8 @@ app.post('/analytics/admin/events/:id/enable', authRole(['admin','mainadmin']), 
   try {
     const { id } = req.params;
     const en = normBool(req.body?.enabled);
-/* removed stray top-level await */if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    const { rows } = await pool.query('UPDATE analytics_events SET enabled=$1 WHERE id=$2 RETURNING *', [en, id]);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
     res.json({ ok:true, id: rows[0].id, enabled: rows[0].enabled });
   } catch (e){ console.error('enable event err:', e); res.status(500).send('Enable event failed'); }
 });
@@ -2611,179 +2745,10 @@ app.post('/analytics/admin/events/reorder', authRole(['admin','mainadmin']), asy
     const { folderId, eventId, direction, newIndex } = req.body || {};
     if (!folderId || !eventId) return res.status(400).json({ error: 'folderId and eventId required' });
     await reorderAnalyticsEvents(Number(folderId), Number(eventId), direction, typeof newIndex==='number'?newIndex:undefined);
-/* removed stray top-level await */res.json({ ok:true, order: rows.map(r=>r.id) });
+    const { rows } = await pool.query('SELECT id FROM analytics_events WHERE folder_id=$1 ORDER BY order_index ASC, id ASC', [folderId]);
+    res.json({ ok:true, order: rows.map(r=>r.id) });
   } catch (e){ console.error('reorder event err:', e); res.status(500).send('Reorder failed'); }
 });
 /* === ANALYTICS_ADMIN_DB_MOUNT_END === */
 
 
-
-/* === ANALYTICS_ADMIN_ROUTES_BEGIN === */
-function aBool(x){ return !(x===false||x==="false"||x===0||x==="0"); }
-function aSlug(s){
-  const raw = (String(s||"").toLowerCase().trim().normalize("NFKD").replace(/[^\w\s-]/g,"").replace(/\s+/g,"-").replace(/-+/g,"-")) || "";
-  return raw || ("group-"+Date.now());
-}
-
-app.get("/analytics/admin/folders", authRole(["admin","mainadmin"]), async (req,res)=>{
-  try {
-    await global.AnalyticsAdmin.ensure();
-    const { rows: folders } = await pool.query("SELECT id,name,slug,enabled,order_index FROM analytics_folders ORDER BY order_index ASC, lower(name) ASC");
-    const out = [];
-    for (const f of folders) {
-      const { rows: evs } = await pool.query(
-        "SELECT id,name,enabled,show_donation_detail,show_expense_detail,order_index FROM analytics_events WHERE folder_id=$1 ORDER BY order_index ASC, lower(name) ASC",
-        [f.id]
-      );
-      out.push({
-        id: f.id, name: f.name, slug: f.slug, enabled: f.enabled, orderIndex: f.order_index,
-        events: evs.map(e=>({ id:e.id, name:e.name, enabled:e.enabled, showDonationDetail:e.show_donation_detail, showExpenseDetail:e.show_expense_detail, orderIndex:e.order_index }))
-      });
-    }
-    res.json(out);
-  } catch (e){ console.error("folders list err:", e); res.status(500).send("Failed to load analytics folders"); }
-});
-
-app.post("/analytics/admin/folders", authRole(["admin","mainadmin"]), async (req,res)=>{
-  try {
-    await global.AnalyticsAdmin.ensure();
-    const { name, folderName, enabled } = req.body || {};
-    const nm = String(folderName || name || "").trim();
-    if (!nm) return res.status(400).json({ error: "name required" });
-    const en = aBool(enabled);
-    let slug = aSlug(nm);
-    for (let i=2; i<100; i++){
-      const { rows } = await pool.query("SELECT 1 FROM analytics_folders WHERE slug=$1 LIMIT 1", [slug]);
-      if (!rows.length) break;
-      slug = `${aSlug(nm)}-${i}`;
-    }
-    const { rows: max } = await pool.query("SELECT COALESCE(MAX(order_index),-1)+1 AS next FROM analytics_folders");
-    const { rows } = await pool.query(
-      "INSERT INTO analytics_folders (name, slug, enabled, order_index) VALUES ($1,$2,$3,$4) RETURNING id,name,slug,enabled,order_index",
-      [nm, slug, en, Number(max[0]?.next||0)]
-    );
-    res.status(201).json(rows[0]);
-  } catch (e){ console.error("create folder err:", e); if((e.code||"").startsWith("23")) return res.status(409).json({ error:"constraint", code:e.code, constraint:e.constraint, detail:e.detail }); res.status(500).send("Create folder failed"); }
-});
-
-app.put("/analytics/admin/folders/:id", authRole(["admin","mainadmin"]), async (req,res)=>{
-  try {
-    const { id } = req.params;
-    const { name, newName, enabled } = req.body || {};
-    const nmIn = String(newName || name || "").trim();
-    const fields = []; const vals = []; let i=1;
-    if (nmIn) {
-      fields.push(`name=$${i++}`); vals.push(nmIn);
-      let sl = aSlug(nmIn);
-      for (let j=2; j<100; j++){ const { rows } = await pool.query("SELECT 1 FROM analytics_folders WHERE slug=$1 AND id<>$2 LIMIT 1",[sl,id]); if(!rows.length) break; sl=`${aSlug(nmIn)}-${j}`; }
-      fields.push(`slug=$${i++}`); vals.push(sl);
-    }
-    if (enabled !== undefined) { fields.push(`enabled=$${i++}`); vals.push(aBool(enabled)); }
-    if (!fields.length) return res.status(400).json({ error: "No changes" });
-    vals.push(id);
-    const { rows } = await pool.query(`UPDATE analytics_folders SET ${fields.join(", ")} WHERE id=$${i} RETURNING *`, vals);
-    if (!rows.length) return res.status(404).json({ error: "Not found" });
-    res.json(rows[0]);
-  } catch (e){ console.error("update folder err:", e); if((e.code||"").startsWith("23")) return res.status(409).json({ error:"constraint", code:e.code, constraint:e.constraint, detail:e.detail }); res.status(500).send("Update folder failed"); }
-});
-
-app.post("/analytics/admin/folders/:id/enable", authRole(["admin","mainadmin"]), async (req,res)=>{
-  try {
-    const { id } = req.params; const en = aBool(req.body?.enabled);
-    const { rows } = await pool.query("UPDATE analytics_folders SET enabled=$1 WHERE id=$2 RETURNING *", [en, id]);
-    if (!rows.length) return res.status(404).json({ error: "Not found" });
-    res.json({ ok:true, id: rows[0].id, enabled: rows[0].enabled });
-  } catch (e){ console.error("enable folder err:", e); res.status(500).send("Enable folder failed"); }
-});
-
-app.delete("/analytics/admin/folders/:id", authRole(["admin","mainadmin"]), async (req,res)=>{
-  try {
-    const { id } = req.params;
-    const { rowCount } = await pool.query("DELETE FROM analytics_folders WHERE id=$1", [id]);
-    if (!rowCount) return res.status(404).json({ error: "Not found" });
-    res.json({ ok:true });
-  } catch (e){ console.error("delete folder err:", e); res.status(500).send("Delete folder failed"); }
-});
-
-app.post("/analytics/admin/folders/reorder", authRole(["admin","mainadmin"]), async (req,res)=>{
-  try {
-    const { folderId, direction, newIndex } = req.body || {};
-    if (!folderId) return res.status(400).json({ error: "folderId required" });
-    await global.AnalyticsAdmin.reorderFolders(Number(folderId), direction, typeof newIndex==='number'?newIndex:undefined);
-    const { rows } = await pool.query("SELECT id FROM analytics_folders ORDER BY order_index ASC, lower(name) ASC");
-    res.json({ ok:true, order: rows.map(r=>r.id) });
-  } catch (e){ console.error("reorder folder err:", e); res.status(500).send("Reorder failed"); }
-});
-
-app.get("/analytics/admin/folders/:folderId/events", authRole(["admin","mainadmin"]), async (req,res)=>{
-  try {
-    const { folderId } = req.params;
-    const { rows } = await pool.query(
-      "SELECT id,name,enabled,show_donation_detail,show_expense_detail,order_index FROM analytics_events WHERE folder_id=$1 ORDER BY order_index ASC, lower(name) ASC",
-      [folderId]
-    );
-    res.json(rows.map(e=>({ id:e.id, name:e.name, enabled:e.enabled, showDonationDetail:e.show_donation_detail, showExpenseDetail:e.show_expense_detail, orderIndex:e.order_index })));
-  } catch (e){ console.error("list events err:", e); res.status(500).send("Failed to load events"); }
-});
-
-app.post("/analytics/admin/events", authRole(["admin","mainadmin"]), async (req,res)=>{
-  try {
-    const { folderId, name, eventName, enabled, showDonationDetail, showExpenseDetail } = req.body || {};
-    if (!folderId) return res.status(400).json({ error: "folderId required" });
-    const nm = String(eventName || name || "").trim();
-    if (!nm) return res.status(400).json({ error: "name required" });
-    const { rows: max } = await pool.query("SELECT COALESCE(MAX(order_index),-1)+1 AS next FROM analytics_events WHERE folder_id=$1", [folderId]);
-    const { rows } = await pool.query(
-      "INSERT INTO analytics_events (folder_id,name,enabled,show_donation_detail,show_expense_detail,order_index) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *",
-      [folderId, nm, aBool(enabled), aBool(showDonationDetail), aBool(showExpenseDetail), Number(max[0]?.next||0)]
-    );
-    res.status(201).json(rows[0]);
-  } catch (e){ console.error("create event err:", e); if((e.code||"").startsWith("23")) return res.status(409).json({ error:"constraint", code:e.code, constraint:e.constraint, detail:e.detail }); res.status(500).send("Create event failed"); }
-});
-
-app.put("/analytics/admin/events/:id", authRole(["admin","mainadmin"]), async (req,res)=>{
-  try {
-    const { id } = req.params;
-    const { name, newName, enabled, showDonationDetail, showExpenseDetail } = req.body || {};
-    const nmIn = String(newName || name || "").trim();
-    const fields=[]; const vals=[]; let i=1;
-    if (nmIn) { fields.push(`name=$${i++}`); vals.push(nmIn); }
-    if (enabled !== undefined) { fields.push(`enabled=$${i++}`); vals.push(aBool(enabled)); }
-    if (showDonationDetail !== undefined) { fields.push(`show_donation_detail=$${i++}`); vals.push(aBool(showDonationDetail)); }
-    if (showExpenseDetail !== undefined) { fields.push(`show_expense_detail=$${i++}`); vals.push(aBool(showExpenseDetail)); }
-    if (!fields.length) return res.status(400).json({ error: "No changes" });
-    vals.push(id);
-    const { rows } = await pool.query(`UPDATE analytics_events SET ${fields.join(", ")} WHERE id=$${i} RETURNING *`, vals);
-    if (!rows.length) return res.status(404).json({ error: "Not found" });
-    res.json(rows[0]);
-  } catch (e){ console.error("update event err:", e); if((e.code||"").startsWith("23")) return res.status(409).json({ error:"constraint", code:e.code, constraint:e.constraint, detail:e.detail }); res.status(500).send("Update event failed"); }
-});
-
-app.post("/analytics/admin/events/:id/enable", authRole(["admin","mainadmin"]), async (req,res)=>{
-  try {
-    const { id } = req.params; const en = aBool(req.body?.enabled);
-    const { rows } = await pool.query("UPDATE analytics_events SET enabled=$1 WHERE id=$2 RETURNING *", [en, id]);
-    if (!rows.length) return res.status(404).json({ error: "Not found" });
-    res.json({ ok:true, id: rows[0].id, enabled: rows[0].enabled });
-  } catch (e){ console.error("enable event err:", e); res.status(500).send("Enable event failed"); }
-});
-
-app.delete("/analytics/admin/events/:id", authRole(["admin","mainadmin"]), async (req,res)=>{
-  try {
-    const { id } = req.params;
-    const { rowCount } = await pool.query("DELETE FROM analytics_events WHERE id=$1", [id]);
-    if (!rowCount) return res.status(404).json({ error: "Not found" });
-    res.json({ ok:true });
-  } catch (e){ console.error("delete event err:", e); res.status(500).send("Delete event failed"); }
-});
-
-app.post("/analytics/admin/events/reorder", authRole(["admin","mainadmin"]), async (req,res)=>{
-  try {
-    const { folderId, eventId, direction, newIndex } = req.body || {};
-    if (!folderId || !eventId) return res.status(400).json({ error: "folderId and eventId required" });
-    await global.AnalyticsAdmin.reorderEvents(Number(folderId), Number(eventId), direction, typeof newIndex==='number'?newIndex:undefined);
-    const { rows } = await pool.query("SELECT id FROM analytics_events WHERE folder_id=$1 ORDER BY order_index ASC, id ASC", [folderId]);
-    res.json({ ok:true, order: rows.map(r=>r.id) });
-  } catch (e){ console.error("reorder event err:", e); res.status(500).send("Reorder failed"); }
-});
-/* === ANALYTICS_ADMIN_ROUTES_END === */
