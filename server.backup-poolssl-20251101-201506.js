@@ -40,15 +40,12 @@ app.use('/uploads', express.static(uploadsDir));
 const analyticsAdminDB = require("./routes/analyticsAdminDB");
 app.use("/analytics/admin", authRole(["admin","mainadmin"]), analyticsAdminDB);
 /* ===================== Postgres ===================== */
-const useSSL = !!(
-  (process.env.DATABASE_URL && /sslmode=require|neon|render|amazonaws|\.neon\.tech/i.test(process.env.DATABASE_URL))
-  || process.env.PGSSL === '1'
-  || process.env.PGSSLMODE === 'require'
-);
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: useSSL ? { rejectUnauthorized: false } : false,
-});/* === ANALYTICS_ADMIN_NS_BEGIN === */
+  ssl: { require: true, rejectUnauthorized: false },
+});
+
+/* === ANALYTICS_ADMIN_NS_BEGIN === */
 global.AnalyticsAdmin = global.AnalyticsAdmin || {};
 
 if (!global.AnalyticsAdmin.ensure) {
