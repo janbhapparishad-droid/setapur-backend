@@ -4,7 +4,7 @@
     "main":  "server.js",
     "type":  "commonjs",
     "scripts":  {
-                    "start":  "node server.js"
+                    "start":  "node scripts/analytics-migrate.js \u0026\u0026 node server.js"
                 },
     "dependencies":  {
                          "bcryptjs":  "^2.4.3",
