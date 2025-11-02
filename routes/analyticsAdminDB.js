@@ -112,7 +112,7 @@ router.post('/folders', async (req,res)=>{
     let slug = slugifyLite(nm);
     if (hasSlug) {
       for (let i=2;i<100;i++){
-        const { rows } = await pool.query('SELECT 1 FROM analytics_folders WHERE slug=' LIMIT 1', [slug]);
+        const { rows } = await pool.query('SELECT 1 FROM analytics_folders WHERE slug=$1 LIMIT 1', [slug]);
         if (!rows.length) break;
         slug = `${slugifyLite(nm)}-${i}`;
       }
