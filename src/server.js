@@ -521,12 +521,17 @@ const createCategoryHandler = async (req, res) => {
     const nm = (req.body?.name ?? '').toString().trim();
     if (!nm) return res.status(400).json({ error: 'name required' });
 
-    // Use DB default for enabled (DEFAULT TRUE), and handle duplicates cleanly
+    // Case-insensitive duplicate check
+    const { rows: dup } = await pool.query(
+      'SELECT 1 FROM categories WHERE lower(name) = lower() LIMIT 1', [nm]
+    );
+    if (dup.length) return res.status(409).json({ error: 'category already exists' });
+
+    // Create with enabled = TRUE (rely on explicit column to avoid DB default confusion)
     const { rows } = await pool.query(
-      'INSERT INTO categories(name) VALUES () ON CONFLICT (name) DO NOTHING RETURNING id, name, enabled, created_at',
+      'INSERT INTO categories (name, enabled) VALUES (, TRUE) RETURNING id, name, enabled, created_at',
       [nm]
     );
-    if (!rows.length) return res.status(409).json({ error: 'category already exists' });
     return res.status(201).json(rows[0]);
   } catch (e) {
     console.error('categories create error:', e);
@@ -631,7 +636,7 @@ app.post('/api/expenses/submit', authRole(['user','admin','mainadmin']), async (
       pushNotification(e.submittedBy, {
         type: 'expenseSubmit',
         title: 'Expense submitted',
-        body: `${e.category}   ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¹${e.amount} (pending approval)`,
+        body: `${e.category}   ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¹${e.amount} (pending approval)`,
         data: { id: e.id, category: e.category, amount: e.amount, approved: false },
       });
     }
@@ -737,7 +742,7 @@ app.post('/admin/expenses/:id/approve', authRole(['admin','mainadmin']), async (
       pushNotification(who, {
         type: `expense${approve ? 'Approval' : 'Pending'}`,
         title: `Expense ${approve ? 'approved' : 'set to pending'}`,
-        body: `${e.category}   ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¹${e.amount}`,
+        body: `${e.category}   ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¹${e.amount}`,
         data: { id: e.id, category: e.category, approved: approve },
       });
     }
@@ -997,7 +1002,7 @@ app.post('/admin/donations/:id/approve', authRole(['admin', 'mainadmin']), async
         pushNotification(donorUser, {
           type: 'donationApproval',
           title: 'Donation approved',
-          body: `Receipt: ${rcOut || 'N/A'}   Event: ${out.category}   Amount: ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¹${pgNum(out.amount)}`,
+          body: `Receipt: ${rcOut || 'N/A'}   Event: ${out.category}   Amount: ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¹${pgNum(out.amount)}`,
           data: { receiptCode: rcOut || null, category: out.category, amount: out.amount, paymentMethod: out.paymentMethod, approved: true },
         });
       }
@@ -1337,7 +1342,7 @@ app.post('/gallery/folders/:slug/reorder', authRole(['admin', 'mainadmin']), asy
   }
 });
 
-// Rename folder (create new row, move images, delete old ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â safe without ON UPDATE CASCADE)
+// Rename folder (create new row, move images, delete old ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â safe without ON UPDATE CASCADE)
 app.post('/gallery/folders/:slug/rename', authRole(['admin', 'mainadmin']), async (req, res) => {
   try {
     await ensureGalleryTables();
@@ -2199,28 +2204,35 @@ app.delete('/admin/categories/:id', authRole(['admin','mainadmin']), catDeleteHa
 async function updateCategoryByIdHandler(req, res) {
   try {
     await ensureCategoriesTable();
-    const id = req.params.id;
+    const id = (req.params?.id ?? req.body?.id ?? req.query?.id);
     if (!id) return res.status(400).json({ error: 'id required' });
 
+    // Accept multiple keys for name and enabled
     const nameIn = (req.body?.name ?? req.body?.newName ?? req.query?.name ?? req.query?.newName);
-    const enabledRaw = (req.body?.enabled ?? req.query?.enabled);
+    const enabledInRaw = (req.body?.enabled ?? req.body?.enable ?? req.body?.isEnabled ?? req.query?.enabled ?? req.query?.enable ?? req.query?.isEnabled ?? req.body?.status ?? req.query?.status);
+
+    let enabledParsed;
+    if (enabledInRaw !== undefined) {
+      const s = String(enabledInRaw).toLowerCase().trim();
+      if (['1','true','yes','on','enabled','active'].includes(s)) enabledParsed = true;
+      else if (['0','false','no','off','disabled','inactive'].includes(s)) enabledParsed = false;
+      else if (typeof enabledInRaw === 'boolean') enabledParsed = enabledInRaw;
+    }
 
     const fields = []; const vals = []; let idx = 1;
-
     if (nameIn !== undefined) {
       const nm = String(nameIn).trim();
       if (!nm) return res.status(400).json({ error: 'name (or newName) required' });
-      fields.push(`name = $${idx++}`); vals.push(nm);
+      fields.push(
+ame = async function updateCategoryByIdHandler\(req, res\) \{[\s\S]*?\n\}\s*app\.put\({idx++}); vals.push(nm);
     }
-    if (enabledRaw !== undefined) {
-      const en = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
-      fields.push(`enabled = $${idx++}`); vals.push(en);
+    if (enabledParsed !== undefined) {
+      fields.push(enabled = async function updateCategoryByIdHandler\(req, res\) \{[\s\S]*?\n\}\s*app\.put\({idx++}); vals.push(enabledParsed);
     }
-
-    if (!fields.length) return res.status(400).json({ error: 'no fields to update' });
+    if (!fields.length) return res.status(400).json({ error: 'send name or enabled' });
 
     vals.push(id);
-    const sql = `UPDATE categories SET ${fields.join(', ')} WHERE id=$${idx} RETURNING id,name,enabled,created_at`;
+    const sql = UPDATE categories SET  WHERE id=async function updateCategoryByIdHandler\(req, res\) \{[\s\S]*?\n\}\s*app\.put\({idx} RETURNING id, name, enabled, created_at;
     const { rows } = await pool.query(sql, vals);
     if (!rows.length) return res.status(404).json({ error: 'category not found' });
     const r = rows[0];
@@ -2261,3 +2273,5 @@ app.get('/public/categories', authOptional, async (req, res) => {
   }
 });
 app.post("/admin/categories/create", authRole(["admin","mainadmin"]), createCategoryHandler);
+
+app.post('/api/admin/categories/update', authRole(['admin','mainadmin']), updateCategoryByIdHandler);
