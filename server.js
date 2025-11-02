@@ -39,6 +39,11 @@ app.use('/uploads', express.static(uploadsDir));
 
 const analyticsAdminDB = require("./routes/analyticsAdminDB");
 app.use("/analytics/admin", authRole(["admin","mainadmin"]), analyticsAdminDB);
+
+
+const analyticsPublic = require("./routes/analyticsPublic");
+app.use("/analytics/public", authRole(['user','admin','mainadmin']), analyticsPublic);
+
 /* ===================== Postgres ===================== */
 const useSSL = !!(
   (process.env.DATABASE_URL && /sslmode=require|neon|render|amazonaws|\.neon\.tech/i.test(process.env.DATABASE_URL))
