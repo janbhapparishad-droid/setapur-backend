@@ -574,14 +574,32 @@ const listCategoriesHandler = async (req, res) => {
     let sql = 'SELECT id, name, enabled, created_at FROM categories';
     if (!isAdmin && !includeDisabled) sql += ' WHERE enabled = true';
     sql += ' ORDER BY lower(name) ASC';
-/* removed stray top-level await */res.json(rows);
-  } catch (e) { console.error('categories list error:', e); res.status(500).send('Failed to list categories'); }
+    const { rows } = await pool.query(sql);
+    res.json(rows);
+  } catch (e) {
+    console.error('categories list error:', e);
+    res.status(500).send('Failed to list categories');
+  }
 };
 const createCategoryHandler = async (req, res) => {
   try {
     await ensureCategoriesTable();
     const { name, enabled } = req.body || {};
     const nm = String(name || '').trim();
+    if (!nm) return res.status(400).json({ error: 'name required' });
+    const en = !(enabled === false || enabled === 'false' || enabled === 0 || enabled === '0');
+    const { rows } = await pool.query(
+      'INSERT INTO categories (name, enabled) VALUES ($1, $2) RETURNING id, name, enabled, created_at',
+      [nm, en]
+    );
+    res.status(201).json(rows[0]);
+  } catch (e) {
+    if ((e.code || '').startsWith('23')) return res.status(409).json({ error: 'category already exists' });
+    console.error('categories create error:', e);
+    res.status(500).send('Create failed');
+  }
+};
+const nm = String(name || '').trim();
     if (!nm) return res.status(400).json({ error: 'name required' });
     const en = !(enabled === false || enabled === 'false' || enabled === 0 || enabled === '0');
 /* removed stray top-level await */res.status(201).json(rows[0]);
