@@ -631,7 +631,7 @@ app.post('/api/expenses/submit', authRole(['user','admin','mainadmin']), async (
       pushNotification(e.submittedBy, {
         type: 'expenseSubmit',
         title: 'Expense submitted',
-        body: `${e.category}   â‚¹${e.amount} (pending approval)`,
+        body: `${e.category}   Ã¢â€šÂ¹${e.amount} (pending approval)`,
         data: { id: e.id, category: e.category, amount: e.amount, approved: false },
       });
     }
@@ -737,7 +737,7 @@ app.post('/admin/expenses/:id/approve', authRole(['admin','mainadmin']), async (
       pushNotification(who, {
         type: `expense${approve ? 'Approval' : 'Pending'}`,
         title: `Expense ${approve ? 'approved' : 'set to pending'}`,
-        body: `${e.category}   â‚¹${e.amount}`,
+        body: `${e.category}   Ã¢â€šÂ¹${e.amount}`,
         data: { id: e.id, category: e.category, approved: approve },
       });
     }
@@ -997,7 +997,7 @@ app.post('/admin/donations/:id/approve', authRole(['admin', 'mainadmin']), async
         pushNotification(donorUser, {
           type: 'donationApproval',
           title: 'Donation approved',
-          body: `Receipt: ${rcOut || 'N/A'}   Event: ${out.category}   Amount: â‚¹${pgNum(out.amount)}`,
+          body: `Receipt: ${rcOut || 'N/A'}   Event: ${out.category}   Amount: Ã¢â€šÂ¹${pgNum(out.amount)}`,
           data: { receiptCode: rcOut || null, category: out.category, amount: out.amount, paymentMethod: out.paymentMethod, approved: true },
         });
       }
@@ -1337,7 +1337,7 @@ app.post('/gallery/folders/:slug/reorder', authRole(['admin', 'mainadmin']), asy
   }
 });
 
-// Rename folder (create new row, move images, delete old â€” safe without ON UPDATE CASCADE)
+// Rename folder (create new row, move images, delete old Ã¢â‚¬â€ safe without ON UPDATE CASCADE)
 app.post('/gallery/folders/:slug/rename', authRole(['admin', 'mainadmin']), async (req, res) => {
   try {
     await ensureGalleryTables();
@@ -2195,70 +2195,6 @@ app.delete('/api/categories/:id', authRole(['admin','mainadmin']), catDeleteHand
 // Extra admin REST deletes
 app.delete('/api/admin/categories/:id', authRole(['admin','mainadmin']), catDeleteHandler);
 app.delete('/admin/categories/:id', authRole(['admin','mainadmin']), catDeleteHandler);
-/* ===== Categories: universal aliases (GET/POST/PUT) for enable/disable/rename/delete ===== */
-function parseBool(val){ if (val===true||val===1||val==="1"||val==="true") return true; if (val===false||val===0||val==="0"||val==="false") return false; return null; }
-function rowToCategory(r){ return { id:r.id, name:r.name, enabled:r.enabled, createdAt:r.created_at }; }
-
-const catAliasPaths = [
-  "/api/admin/category/:action",
-  "/api/admin/categories/:action",
-  "/api/categories/:action",
-  "/admin/categories/:action",
-  "/admin/category/:action"
-];
-
-catAliasPaths.forEach((p) => {
-  app.all(p, authRole(["admin","mainadmin"]), async (req, res) => {
-    try {
-      await ensureCategoriesTable();
-      const action = String(req.params.action || "").toLowerCase();
-      const id = (req.params && req.params.id) || req.body?.id || req.query?.id;
-      if (!id) return res.status(400).json({ error: "id required" });
-
-      if (action === "enable" || action === "disable") {
-        let enabled = action === "disable" ? false : true;
-        const maybe = parseBool(req.body?.enabled ?? req.query?.enabled);
-        if (maybe !== null) enabled = maybe;
-        const { rows } = await pool.query(
-          "UPDATE categories SET enabled=$1 WHERE id=$2 RETURNING id,name,enabled,created_at",
-          [enabled, id]
-        );
-        if (!rows.length) return res.status(404).json({ error: "category not found" });
-        return res.json({ ok: true, category: rowToCategory(rows[0]) });
-      }
-
-      if (action === "rename" || action === "update" || action === "edit") {
-        const desired = String((req.body?.name || req.body?.newName || req.query?.name || req.query?.newName || "")).trim();
-        if (!desired) return res.status(400).json({ error: "name (or newName) required" });
-        try {
-          const { rows } = await pool.query(
-            "UPDATE categories SET name=$1 WHERE id=$2 RETURNING id,name,enabled,created_at",
-            [desired, id]
-          );
-          if (!rows.length) return res.status(404).json({ error: "category not found" });
-          return res.json({ ok: true, category: rowToCategory(rows[0]) });
-        } catch (e) {
-          if ((e.code||"").startsWith("23")) return res.status(409).json({ error: "category already exists" });
-          throw e;
-        }
-      }
-
-      if (action === "delete" || action === "remove" || action === "del") {
-        const { rows } = await pool.query(
-          "DELETE FROM categories WHERE id=$1 RETURNING id,name,enabled,created_at",
-          [id]
-        );
-        if (!rows.length) return res.status(404).json({ error: "category not found" });
-        return res.json({ ok: true, category: rowToCategory(rows[0]) });
-      }
-
-      return res.status(404).json({ error: "unknown action", action });
-    } catch (e) {
-      console.error("categories universal alias error:", e);
-      res.status(500).send("Category action failed");
-    }
-  });
-});
 /* ===== Categories REST update (PUT/PATCH /.../categories/:id) ===== */
 async function updateCategoryByIdHandler(req, res) {
   try {
