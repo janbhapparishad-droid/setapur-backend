@@ -2259,3 +2259,45 @@ catAliasPaths.forEach((p) => {
     }
   });
 });
+/* ===== Categories REST update (PUT/PATCH /.../categories/:id) ===== */
+async function updateCategoryByIdHandler(req, res) {
+  try {
+    await ensureCategoriesTable();
+    const id = req.params.id;
+    if (!id) return res.status(400).json({ error: 'id required' });
+
+    const nameIn = (req.body?.name ?? req.body?.newName ?? req.query?.name ?? req.query?.newName);
+    const enabledRaw = (req.body?.enabled ?? req.query?.enabled);
+
+    const fields = []; const vals = []; let idx = 1;
+
+    if (nameIn !== undefined) {
+      const nm = String(nameIn).trim();
+      if (!nm) return res.status(400).json({ error: 'name (or newName) required' });
+      fields.push(`name = $${idx++}`); vals.push(nm);
+    }
+    if (enabledRaw !== undefined) {
+      const en = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
+      fields.push(`enabled = $${idx++}`); vals.push(en);
+    }
+
+    if (!fields.length) return res.status(400).json({ error: 'no fields to update' });
+
+    vals.push(id);
+    const sql = `UPDATE categories SET ${fields.join(', ')} WHERE id=$${idx} RETURNING id,name,enabled,created_at`;
+    const { rows } = await pool.query(sql, vals);
+    if (!rows.length) return res.status(404).json({ error: 'category not found' });
+    const r = rows[0];
+    return res.json({ ok: true, category: { id: r.id, name: r.name, enabled: r.enabled, createdAt: r.created_at } });
+  } catch (e) {
+    if ((e.code || '').startsWith('23')) return res.status(409).json({ error: 'category already exists' });
+    console.error('categories PUT/PATCH error:', e);
+    res.status(500).send('Category update failed');
+  }
+}
+app.put('/api/admin/categories/:id', authRole(['admin','mainadmin']), updateCategoryByIdHandler);
+app.patch('/api/admin/categories/:id', authRole(['admin','mainadmin']), updateCategoryByIdHandler);
+app.put('/admin/categories/:id', authRole(['admin','mainadmin']), updateCategoryByIdHandler);
+app.patch('/admin/categories/:id', authRole(['admin','mainadmin']), updateCategoryByIdHandler);
+app.put('/api/categories/:id', authRole(['admin','mainadmin']), updateCategoryByIdHandler);
+app.patch('/api/categories/:id', authRole(['admin','mainadmin']), updateCategoryByIdHandler);
