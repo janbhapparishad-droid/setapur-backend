@@ -631,7 +631,7 @@ app.post('/api/expenses/submit', authRole(['user','admin','mainadmin']), async (
       pushNotification(e.submittedBy, {
         type: 'expenseSubmit',
         title: 'Expense submitted',
-        body: `${e.category}   ₹${e.amount} (pending approval)`,
+        body: `${e.category}   â‚¹${e.amount} (pending approval)`,
         data: { id: e.id, category: e.category, amount: e.amount, approved: false },
       });
     }
@@ -737,7 +737,7 @@ app.post('/admin/expenses/:id/approve', authRole(['admin','mainadmin']), async (
       pushNotification(who, {
         type: `expense${approve ? 'Approval' : 'Pending'}`,
         title: `Expense ${approve ? 'approved' : 'set to pending'}`,
-        body: `${e.category}   ₹${e.amount}`,
+        body: `${e.category}   â‚¹${e.amount}`,
         data: { id: e.id, category: e.category, approved: approve },
       });
     }
@@ -997,7 +997,7 @@ app.post('/admin/donations/:id/approve', authRole(['admin', 'mainadmin']), async
         pushNotification(donorUser, {
           type: 'donationApproval',
           title: 'Donation approved',
-          body: `Receipt: ${rcOut || 'N/A'}   Event: ${out.category}   Amount: ₹${pgNum(out.amount)}`,
+          body: `Receipt: ${rcOut || 'N/A'}   Event: ${out.category}   Amount: â‚¹${pgNum(out.amount)}`,
           data: { receiptCode: rcOut || null, category: out.category, amount: out.amount, paymentMethod: out.paymentMethod, approved: true },
         });
       }
@@ -1337,7 +1337,7 @@ app.post('/gallery/folders/:slug/reorder', authRole(['admin', 'mainadmin']), asy
   }
 });
 
-// Rename folder (create new row, move images, delete old — safe without ON UPDATE CASCADE)
+// Rename folder (create new row, move images, delete old â€” safe without ON UPDATE CASCADE)
 app.post('/gallery/folders/:slug/rename', authRole(['admin', 'mainadmin']), async (req, res) => {
   try {
     await ensureGalleryTables();
@@ -1978,6 +1978,13 @@ try {
   console.warn('analyticsPublic route not mounted:', e.message);
 }
 
+try {
+  const aiRoutes = require("./routes/ai");
+  // limit to admins to avoid abuse; change to ["user","admin","mainadmin"] if needed
+  app.use("/ai", authRole(["admin","mainadmin"]), aiRoutes);
+} catch (e) {
+  console.warn('ai routes not mounted:', e.message);
+}
 const PORT = parseInt(process.env.PORT || '10000', 10);
 const HOST = '0.0.0.0';
 
