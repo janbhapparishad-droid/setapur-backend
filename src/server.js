@@ -518,12 +518,12 @@ const listCategoriesHandler = async (req, res) => {
 const createCategoryHandler = async (req, res) => {
   try {
     await ensureCategoriesTable();
-    const { name, enabled } = req.body || {};
+    const { name } = req.body || {};
     const nm = String(name || '').trim();
     if (!nm) return res.status(400).json({ error: 'name required' });
-    const en = !(enabled === false || enabled === 'false' || enabled === 0 || enabled === '0');
+    const en = true; // force enabled by default
     const { rows } = await pool.query(
-      'INSERT INTO categories (name, enabled) VALUES ($1, $2) RETURNING id, name, enabled, created_at',
+      'INSERT INTO categories (name, enabled) VALUES (, ) RETURNING id, name, enabled, created_at',
       [nm, en]
     );
     res.status(201).json(rows[0]);
@@ -631,7 +631,7 @@ app.post('/api/expenses/submit', authRole(['user','admin','mainadmin']), async (
       pushNotification(e.submittedBy, {
         type: 'expenseSubmit',
         title: 'Expense submitted',
-        body: `${e.category}   Ã¢â€šÂ¹${e.amount} (pending approval)`,
+        body: `${e.category}   ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¹${e.amount} (pending approval)`,
         data: { id: e.id, category: e.category, amount: e.amount, approved: false },
       });
     }
@@ -737,7 +737,7 @@ app.post('/admin/expenses/:id/approve', authRole(['admin','mainadmin']), async (
       pushNotification(who, {
         type: `expense${approve ? 'Approval' : 'Pending'}`,
         title: `Expense ${approve ? 'approved' : 'set to pending'}`,
-        body: `${e.category}   Ã¢â€šÂ¹${e.amount}`,
+        body: `${e.category}   ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¹${e.amount}`,
         data: { id: e.id, category: e.category, approved: approve },
       });
     }
@@ -997,7 +997,7 @@ app.post('/admin/donations/:id/approve', authRole(['admin', 'mainadmin']), async
         pushNotification(donorUser, {
           type: 'donationApproval',
           title: 'Donation approved',
-          body: `Receipt: ${rcOut || 'N/A'}   Event: ${out.category}   Amount: Ã¢â€šÂ¹${pgNum(out.amount)}`,
+          body: `Receipt: ${rcOut || 'N/A'}   Event: ${out.category}   Amount: ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¹${pgNum(out.amount)}`,
           data: { receiptCode: rcOut || null, category: out.category, amount: out.amount, paymentMethod: out.paymentMethod, approved: true },
         });
       }
@@ -1337,7 +1337,7 @@ app.post('/gallery/folders/:slug/reorder', authRole(['admin', 'mainadmin']), asy
   }
 });
 
-// Rename folder (create new row, move images, delete old Ã¢â‚¬â€ safe without ON UPDATE CASCADE)
+// Rename folder (create new row, move images, delete old ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â safe without ON UPDATE CASCADE)
 app.post('/gallery/folders/:slug/rename', authRole(['admin', 'mainadmin']), async (req, res) => {
   try {
     await ensureGalleryTables();
@@ -2237,3 +2237,26 @@ app.put('/admin/categories/:id', authRole(['admin','mainadmin']), updateCategory
 app.patch('/admin/categories/:id', authRole(['admin','mainadmin']), updateCategoryByIdHandler);
 app.put('/api/categories/:id', authRole(['admin','mainadmin']), updateCategoryByIdHandler);
 app.patch('/api/categories/:id', authRole(['admin','mainadmin']), updateCategoryByIdHandler);
+/* Categories: enabled-only list endpoints */
+app.get('/api/categories/enabled', authRole(['user','admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureCategoriesTable();
+    const { rows } = await pool.query('SELECT id, name, enabled, created_at FROM categories WHERE enabled = true ORDER BY lower(name) ASC');
+    res.json(rows);
+  } catch (e) {
+    console.error('categories enabled-list error:', e);
+    res.status(500).send('Failed to list categories');
+  }
+});
+
+// Public (no token) - always enabled only
+app.get('/public/categories', authOptional, async (req, res) => {
+  try {
+    await ensureCategoriesTable();
+    const { rows } = await pool.query('SELECT id, name FROM categories WHERE enabled = true ORDER BY lower(name) ASC');
+    res.json(rows);
+  } catch (e) {
+    console.error('public categories list error:', e);
+    res.status(500).send('Failed to list categories');
+  }
+});
