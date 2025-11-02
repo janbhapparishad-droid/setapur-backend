@@ -17,7 +17,7 @@ function slugifyLite(s){
 }
 
 async function ensure(){
-  await pool.query(
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS analytics_folders (
       id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,
@@ -39,7 +39,7 @@ async function ensure(){
     CREATE INDEX IF NOT EXISTS idx_analytics_folders_order ON analytics_folders(order_index, lower(name));
     CREATE INDEX IF NOT EXISTS idx_analytics_events_folder ON analytics_events(folder_id);
     CREATE INDEX IF NOT EXISTS idx_analytics_events_order ON analytics_events(folder_id, order_index);
-  );
+  `);
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -50,16 +50,16 @@ async function resolveFolderId(input) {
   if (/^\d+$/.test(s)) return Number(s);
   if (UUID_RE.test(s)) {
     try {
-      const { rows } = await pool.query('SELECT id FROM analytics_folders WHERE folder_id=', [s]);
+      const { rows } = await pool.query('SELECT id FROM analytics_folders WHERE folder_id=$1', [s]);
       if (rows.length) return rows[0].id;
     } catch (_) {}
   }
   try {
-    const bySlug = await pool.query('SELECT id FROM analytics_folders WHERE slug=', [s]);
+    const bySlug = await pool.query('SELECT id FROM analytics_folders WHERE slug=$1', [s]);
     if (bySlug.rows.length) return bySlug.rows[0].id;
   } catch (_){}
   try {
-    const byName = await pool.query('SELECT id FROM analytics_folders WHERE lower(name)=lower()', [s]);
+    const byName = await pool.query('SELECT id FROM analytics_folders WHERE lower(name)=lower($1)', [s]);
     if (byName.rows.length) return byName.rows[0].id;
   } catch (_){}
   return null;
@@ -79,12 +79,12 @@ async function reorderFolders(folderId, direction, newIndex){
     [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
   }
   for (let i=0;i<list.length;i++) {
-    await pool.query('UPDATE analytics_folders SET order_index= WHERE id=', [i, list[i]]);
+    await pool.query('UPDATE analytics_folders SET order_index=$1 WHERE id=$2', [i, list[i]]);
   }
 }
 
 async function reorderEvents(folderId, eventId, direction, newIndex){
-  const { rows } = await pool.query('SELECT id FROM analytics_events WHERE folder_id= ORDER BY order_index ASC, id ASC', [folderId]);
+  const { rows } = await pool.query('SELECT id FROM analytics_events WHERE folder_id=$1 ORDER BY order_index ASC, id ASC', [folderId]);
   let list = rows.map(r => r.id);
   let idx = list.indexOf(Number(eventId));
   if (idx === -1) return;
@@ -97,7 +97,7 @@ async function reorderEvents(folderId, eventId, direction, newIndex){
     [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
   }
   for (let i=0;i<list.length;i++) {
-    await pool.query('UPDATE analytics_events SET order_index= WHERE id=', [i, list[i]]);
+    await pool.query('UPDATE analytics_events SET order_index=$1 WHERE id=$2', [i, list[i]]);
   }
 }
 
@@ -111,7 +111,7 @@ router.get('/folders', async (req,res)=>{
     const out=[];
     for (const f of folders){
       const { rows: evs } = await pool.query(
-        'SELECT id,name,enabled,show_donation_detail,show_expense_detail,order_index FROM analytics_events WHERE folder_id= ORDER BY order_index ASC, lower(name) ASC',
+        'SELECT id,name,enabled,show_donation_detail,show_expense_detail,order_index FROM analytics_events WHERE folder_id=$1 ORDER BY order_index ASC, lower(name) ASC',
         [f.id]
       );
       out.push({
@@ -142,7 +142,7 @@ router.post('/folders', async (req,res)=>{
     let slug = slugifyLite(nm);
     if (hasSlug) {
       for (let i=2;i<100;i++){
-        const { rows } = await pool.query('SELECT 1 FROM analytics_folders WHERE slug= LIMIT 1', [slug]);
+        const { rows } = await pool.query('SELECT 1 FROM analytics_folders WHERE slug=$1 LIMIT 1', [slug]);
         if (!rows.length) break;
         slug = slugifyLite(nm) + '-' + i;
       }
@@ -220,7 +220,7 @@ router.put('/folders/:id', async (req,res)=>{
       if (hasSlug){
         let sl = slugifyLite(nmIn);
         for (let j=2;j<100;j++){
-          const { rows } = await pool.query('SELECT 1 FROM analytics_folders WHERE slug= AND id<> LIMIT 1',[sl,id]);
+          const { rows } = await pool.query('SELECT 1 FROM analytics_folders WHERE slug=$1 AND id<>$2 LIMIT 1',[sl,id]);
           if(!rows.length) break; sl = slugifyLite(nmIn) + '-' + j;
         }
         fields.push('slug=$' + (i++)); vals.push(sl);
@@ -251,7 +251,7 @@ router.put('/folders/:id', async (req,res)=>{
 router.post('/folders/:id/enable', async (req,res)=>{
   try{
     const { id } = req.params; const en = b(req.body?.enabled);
-    const { rows } = await pool.query('UPDATE analytics_folders SET enabled= WHERE id= RETURNING *', [en, id]);
+    const { rows } = await pool.query('UPDATE analytics_folders SET enabled=$1 WHERE id=$2 RETURNING *', [en, id]);
     if (!rows.length) return res.status(404).json({ error:'Not found' });
     res.json({ ok:true, id: rows[0].id, enabled: rows[0].enabled });
   }catch(e){ console.error('enable folder err:', e); res.status(500).send('Enable folder failed'); }
@@ -261,7 +261,7 @@ router.post('/folders/:id/enable', async (req,res)=>{
 router.delete('/folders/:id', async (req,res)=>{
   try{
     const { id } = req.params;
-    const { rowCount } = await pool.query('DELETE FROM analytics_folders WHERE id=', [id]);
+    const { rowCount } = await pool.query('DELETE FROM analytics_folders WHERE id=$1', [id]);
     if (!rowCount) return res.status(404).json({ error:'Not found' });
     res.json({ ok:true });
   }catch(e){ console.error('delete folder err:', e); res.status(500).send('Delete folder failed'); }
@@ -284,7 +284,7 @@ router.get('/folders/:folderId/events', async (req,res)=>{
     const fid = await resolveFolderId(req.params.folderId);
     if (!fid) return res.status(404).json({ error: 'Folder not found' });
     const { rows } = await pool.query(
-      'SELECT id,name,enabled,show_donation_detail,show_expense_detail,order_index FROM analytics_events WHERE folder_id= ORDER BY order_index ASC, lower(name) ASC',
+      'SELECT id,name,enabled,show_donation_detail,show_expense_detail,order_index FROM analytics_events WHERE folder_id=$1 ORDER BY order_index ASC, lower(name) ASC',
       [fid]
     );
     res.json(rows.map(e=>({ id:e.id, name:e.name, enabled:e.enabled, showDonationDetail:e.show_donation_detail, showExpenseDetail:e.show_expense_detail, orderIndex:e.order_index })));
@@ -301,11 +301,11 @@ router.post('/events', async (req,res)=>{
     const fid = await resolveFolderId(folderId ?? folderUUID ?? folderSlug);
     if (!fid) return res.status(400).json({ error:'folder not found' });
 
-    const { rows: max } = await pool.query('SELECT COALESCE(MAX(order_index),-1)+1 AS next FROM analytics_events WHERE folder_id=', [fid]);
+    const { rows: max } = await pool.query('SELECT COALESCE(MAX(order_index),-1)+1 AS next FROM analytics_events WHERE folder_id=$1', [fid]);
     const next = Number(max[0]?.next || 0);
 
     const { rows } = await pool.query(
-      'INSERT INTO analytics_events (folder_id,name,enabled,show_donation_detail,show_expense_detail,order_index) VALUES (,,,,,) RETURNING *',
+      'INSERT INTO analytics_events (folder_id,name,enabled,show_donation_detail,show_expense_detail,order_index) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *',
       [fid, nm, b(enabled), b(showDonationDetail), b(showExpenseDetail), next]
     );
     return res.status(201).json(rows[0]);
@@ -324,11 +324,11 @@ router.post('/folders/:folderId/events', async (req,res)=>{
     const fid = await resolveFolderId(req.params.folderId);
     if (!fid) return res.status(400).json({ error:'folder not found' });
 
-    const { rows: max } = await pool.query('SELECT COALESCE(MAX(order_index),-1)+1 AS next FROM analytics_events WHERE folder_id=', [fid]);
+    const { rows: max } = await pool.query('SELECT COALESCE(MAX(order_index),-1)+1 AS next FROM analytics_events WHERE folder_id=$1', [fid]);
     const next = Number(max[0]?.next || 0);
 
     const { rows } = await pool.query(
-      'INSERT INTO analytics_events (folder_id,name,enabled,show_donation_detail,show_expense_detail,order_index) VALUES (,,,,,) RETURNING *',
+      'INSERT INTO analytics_events (folder_id,name,enabled,show_donation_detail,show_expense_detail,order_index) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *',
       [fid, nm, b(req.body?.enabled), b(req.body?.showDonationDetail), b(req.body?.showExpenseDetail), next]
     );
     return res.status(201).json(rows[0]);
@@ -370,7 +370,7 @@ router.put('/events/:id', async (req,res)=>{
 router.post('/events/:id/enable', async (req,res)=>{
   try{
     const { id } = req.params; const en = b(req.body?.enabled);
-    const { rows } = await pool.query('UPDATE analytics_events SET enabled= WHERE id= RETURNING *', [en, id]);
+    const { rows } = await pool.query('UPDATE analytics_events SET enabled=$1 WHERE id=$2 RETURNING *', [en, id]);
     if (!rows.length) return res.status(404).json({ error:'Not found' });
     res.json({ ok:true, id: rows[0].id, enabled: rows[0].enabled });
   }catch(e){ console.error('enable event err:', e); res.status(500).send('Enable event failed'); }
@@ -380,7 +380,7 @@ router.post('/events/:id/enable', async (req,res)=>{
 router.delete('/events/:id', async (req,res)=>{
   try{
     const { id } = req.params;
-    const { rowCount } = await pool.query('DELETE FROM analytics_events WHERE id=', [id]);
+    const { rowCount } = await pool.query('DELETE FROM analytics_events WHERE id=$1', [id]);
     if (!rowCount) return res.status(404).json({ error:'Not found' });
     res.json({ ok:true });
   }catch(e){ console.error('delete event err:', e); res.status(500).send('Delete event failed'); }
@@ -393,7 +393,7 @@ router.post('/events/reorder', async (req,res)=>{
     const fid = await resolveFolderId(folderId);
     if (!fid || !eventId) return res.status(400).json({ error:'folderId and eventId required' });
     await reorderEvents(Number(fid), Number(eventId), direction, typeof newIndex==='number'?newIndex:undefined);
-    const { rows } = await pool.query('SELECT id FROM analytics_events WHERE folder_id= ORDER BY order_index ASC, id ASC', [fid]);
+    const { rows } = await pool.query('SELECT id FROM analytics_events WHERE folder_id=$1 ORDER BY order_index ASC, id ASC', [fid]);
     res.json({ ok:true, order: rows.map(r=>r.id) });
   }catch(e){ console.error('reorder event err:', e); res.status(500).send('Reorder failed'); }
 });
