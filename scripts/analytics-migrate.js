@@ -13,10 +13,7 @@ const pool = new Pool({ connectionString, ssl: useSSL ? { rejectUnauthorized: fa
 (async () => {
   const client = await pool.connect();
   const q = (text, params) => client.query(text, params);
-  const safe = async (label, sql) => {
-    try { await q(sql); console.log("✓", label); }
-    catch (e) { console.warn("~", label, "-", e.message); }
-  };
+  const safe = async (label, sql) => { try { await q(sql); console.log("✓", label); } catch (e) { console.warn("~", label, "-", e.message); } };
   async function colExists(table, column) {
     const { rows } = await q(`SELECT 1 FROM information_schema.columns WHERE table_name=$1 AND column_name=$2`, [table, column]);
     return rows.length > 0;
@@ -41,7 +38,7 @@ const pool = new Pool({ connectionString, ssl: useSSL ? { rejectUnauthorized: fa
   }
 
   try {
-    // folders: base table + columns
+    // Folders table and columns
     await safe("create analytics_folders", `
       CREATE TABLE IF NOT EXISTS analytics_folders (
         id SERIAL PRIMARY KEY,
@@ -64,8 +61,9 @@ const pool = new Pool({ connectionString, ssl: useSSL ? { rejectUnauthorized: fa
     // legacy: copy sort -> order_index if sort exists
     await safe("folders copy sort->order_index", `UPDATE analytics_folders SET order_index = sort WHERE (order_index IS NULL OR order_index = 0) AND sort IS NOT NULL`);
 
-    // legacy: parent_id sometimes NOT NULL in old schema => relax it (harmless if column missing)
+    // legacy: parent_id can be enforced in older schema; make it nullable if it exists
     await safe("folders parent_id nullable", `ALTER TABLE analytics_folders ALTER COLUMN parent_id DROP NOT NULL`);
+    await safe("folders parent_id drop default", `ALTER TABLE analytics_folders ALTER COLUMN parent_id DROP DEFAULT`);
 
     // legacy: folder_id default/backfill
     if (await colExists('analytics_folders','folder_id')) {
@@ -112,15 +110,13 @@ const pool = new Pool({ connectionString, ssl: useSSL ? { rejectUnauthorized: fa
           IF NEW.order_index IS NULL THEN
             SELECT COALESCE(MAX(order_index), -1) + 1 INTO NEW.order_index FROM analytics_folders;
           END IF;
-        EXCEPTION WHEN undefined_column THEN NULL;
-        END;
+        EXCEPTION WHEN undefined_column THEN NULL; END;
 
         BEGIN
           IF NEW.sort IS NULL THEN
             SELECT COALESCE(MAX(sort), -1) + 1 INTO NEW.sort FROM analytics_folders;
           END IF;
-        EXCEPTION WHEN undefined_column THEN NULL;
-        END;
+        EXCEPTION WHEN undefined_column THEN NULL; END;
 
         RETURN NEW;
       END
