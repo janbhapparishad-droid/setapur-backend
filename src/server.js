@@ -2046,3 +2046,91 @@ app.post('/admin/create-user', authRole(['admin','mainadmin']), async (req, res)
     res.status(500).json({ error: 'Create user failed' });
   }
 });
+/* ===================== Categories: enable/rename/delete ===================== */
+function rowToCategory(r){ return { id:r.id, name:r.name, enabled:r.enabled, createdAt:r.created_at }; }
+
+// Enable/Disable by param id
+app.post('/api/categories/:id/enable', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureCategoriesTable();
+    const id = req.params.id;
+    const enabledRaw = req.body.enabled;
+    const enabled = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
+    const { rows } = await pool.query(
+      'UPDATE categories SET enabled=$1 WHERE id=$2 RETURNING id,name,enabled,created_at', [enabled, id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'category not found' });
+    res.json({ ok:true, category: rowToCategory(rows[0]) });
+  } catch(e){ console.error('categories enable error:', e); res.status(500).send('Failed to update category'); }
+});
+
+// Rename by param id
+app.post('/api/categories/:id/rename', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureCategoriesTable();
+    const id = req.params.id;
+    const desired = String((req.body?.name || req.body?.newName || '')).trim();
+    if (!desired) return res.status(400).json({ error: 'name (or newName) required' });
+    const { rows } = await pool.query(
+      'UPDATE categories SET name=$1 WHERE id=$2 RETURNING id,name,enabled,created_at', [desired, id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'category not found' });
+    res.json({ ok:true, category: rowToCategory(rows[0]) });
+  } catch(e){
+    if ((e.code||'').startsWith('23')) return res.status(409).json({ error: 'category already exists' });
+    console.error('categories rename error:', e); res.status(500).send('Failed to rename category');
+  }
+});
+
+// Delete by param id
+app.delete('/api/categories/:id', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureCategoriesTable();
+    const id = req.params.id;
+    const { rows } = await pool.query('DELETE FROM categories WHERE id=$1 RETURNING id,name,enabled,created_at', [id]);
+    if (!rows.length) return res.status(404).json({ error: 'category not found' });
+    res.json({ ok:true, category: rowToCategory(rows[0]) });
+  } catch(e){ console.error('categories delete error:', e); res.status(500).send('Failed to delete category'); }
+});
+
+// Admin FE aliases (body.id based)
+app.post('/api/admin/categories/enable', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureCategoriesTable();
+    const id = req.body?.id;
+    if (!id) return res.status(400).json({ error: 'id required' });
+    const enabledRaw = req.body.enabled;
+    const enabled = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
+    const { rows } = await pool.query('UPDATE categories SET enabled=$1 WHERE id=$2 RETURNING id,name,enabled,created_at', [enabled, id]);
+    if (!rows.length) return res.status(404).json({ error: 'category not found' });
+    res.json({ ok:true, category: rowToCategory(rows[0]) });
+  } catch(e){ console.error('categories alias enable error:', e); res.status(500).send('Failed to update category'); }
+});
+
+app.post('/api/admin/categories/rename', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureCategoriesTable();
+    const id = req.body?.id;
+    const desired = String((req.body?.name || req.body?.newName || '')).trim();
+    if (!id) return res.status(400).json({ error: 'id required' });
+    if (!desired) return res.status(400).json({ error: 'name (or newName) required' });
+    const { rows } = await pool.query('UPDATE categories SET name=$1 WHERE id=$2 RETURNING id,name,enabled,created_at', [desired, id]);
+    if (!rows.length) return res.status(404).json({ error: 'category not found' });
+    res.json({ ok:true, category: rowToCategory(rows[0]) });
+  } catch(e){
+    if ((e.code||'').startsWith('23')) return res.status(409).json({ error: 'category already exists' });
+    console.error('categories alias rename error:', e); res.status(500).send('Failed to rename category');
+  }
+});
+
+app.post('/api/admin/categories/delete', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureCategoriesTable();
+    const id = req.body?.id;
+    if (!id) return res.status(400).json({ error: 'id required' });
+    const { rows } = await pool.query('DELETE FROM categories WHERE id=$1 RETURNING id,name,enabled,created_at', [id]);
+    if (!rows.length) return res.status(404).json({ error: 'category not found' });
+    res.json({ ok:true, category: rowToCategory(rows[0]) });
+  } catch(e){ console.error('categories alias delete error:', e); res.status(500).send('Failed to delete category'); }
+});
+/* ===================== End: Categories mgmt ===================== */
