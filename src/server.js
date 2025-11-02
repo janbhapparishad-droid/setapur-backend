@@ -2021,3 +2021,28 @@ app.get('/debug/version', (req, res) => {
     res.json({ file: __filename, lines: txt.split('\n').length, sha1: hash, ts: Date.now() });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+/* --- alias: POST /admin/create-user -> same as POST /admin/users --- */
+app.post('/admin/create-user', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    const usernameIn = (req.body?.username || req.body?.id || '').toString().trim();
+    const passwordIn = (req.body?.password || '').toString();
+    let roleIn = (req.body?.role || 'user').toString().trim().toLowerCase();
+    if (!ALLOWED_ROLES.has(roleIn)) roleIn = 'user';
+    if (!usernameIn || !passwordIn) return res.status(400).json({ error: 'username and password required' });
+
+    const users = await getUsers();
+    if (users.find(u => String(u.username).toLowerCase() === usernameIn.toLowerCase())) {
+      return res.status(409).json({ error: 'username already exists' });
+    }
+    const next = users.slice();
+    next.push({ username: usernameIn, password: passwordIn, role: roleIn, banned: false });
+    await saveUsers(next);
+
+    const after = await getUsers();
+    const created = after.find(u => String(u.username).toLowerCase() === usernameIn.toLowerCase());
+    res.status(201).json({ id: created?.id, username: created?.username, role: created?.role });
+  } catch (e) {
+    console.error('create user (alias) error:', e);
+    res.status(500).json({ error: 'Create user failed' });
+  }
+});
