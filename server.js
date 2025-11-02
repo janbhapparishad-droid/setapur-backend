@@ -42,8 +42,7 @@ app.use("/analytics/admin", authRole(["admin","mainadmin"]), analyticsAdminDB);
 
 
 const analyticsPublic = require("./routes/analyticsPublic");
-app.use("/analytics/public", authRole(['user','admin','mainadmin']), analyticsPublic);
-
+app.use("/analytics/public", authOptional, analyticsPublic);
 /* ===================== Postgres ===================== */
 const useSSL = !!(
   (process.env.DATABASE_URL && /sslmode=require|neon|render|amazonaws|\.neon\.tech/i.test(process.env.DATABASE_URL))
@@ -214,6 +213,21 @@ function authRole(roles) {
         if (u && (u.banned === true || u.banned === 'true' || u.banned === 1 || u.banned === '1')) {
           return res.status(403).send('User banned');
         }
+
+function authOptional(req, res, next) {
+  try {
+    const header = req.headers['authorization'];
+    if (header) {
+      const token = header.startsWith('Bearer ') ? header.slice(7).trim() : String(header).trim();
+      const verified = jwt.verify(token, SECRET_KEY);
+      verified.role = normRole(verified.role);
+      verified.username = String(verified.username || '');
+      req.user = verified;
+    }
+  } catch (_) { /* ignore bad/missing token */ }
+  next();
+}
+
       } catch (_) {}
       next();
     } catch (err) {
