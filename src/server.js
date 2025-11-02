@@ -2013,3 +2013,11 @@ start();app.get('/debug/version', (req, res) => {
     res.json({ file: __filename, lines: txt.split('\n').length, sha1: hash, ts: Date.now() });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+app.get('/debug/version', (req, res) => {
+  try {
+    const fs = require('fs'); const crypto = require('crypto');
+    const txt = fs.readFileSync(__filename, 'utf8');
+    const hash = crypto.createHash('sha1').update(txt).digest('hex');
+    res.json({ file: __filename, lines: txt.split('\n').length, sha1: hash, ts: Date.now() });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
