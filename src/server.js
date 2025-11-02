@@ -518,12 +518,11 @@ const listCategoriesHandler = async (req, res) => {
 const createCategoryHandler = async (req, res) => {
   try {
     await ensureCategoriesTable();
-    const { name } = req.body || {};
-    const nm = (name ?? '').toString().trim();
+    const nm = (req.body?.name ?? '').toString().trim();
     if (!nm) return res.status(400).json({ error: 'name required' });
-    // rely on DB default: enabled DEFAULT TRUE
+    // Always create enabled
     const { rows } = await pool.query(
-      'INSERT INTO categories (name) VALUES () RETURNING id, name, enabled, created_at',
+      'INSERT INTO categories (name, enabled) VALUES (, true) RETURNING id, name, enabled, created_at',
       [nm]
     );
     return res.status(201).json(rows[0]);
@@ -631,7 +630,7 @@ app.post('/api/expenses/submit', authRole(['user','admin','mainadmin']), async (
       pushNotification(e.submittedBy, {
         type: 'expenseSubmit',
         title: 'Expense submitted',
-        body: `${e.category}   ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¹${e.amount} (pending approval)`,
+        body: `${e.category}   ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¹${e.amount} (pending approval)`,
         data: { id: e.id, category: e.category, amount: e.amount, approved: false },
       });
     }
@@ -737,7 +736,7 @@ app.post('/admin/expenses/:id/approve', authRole(['admin','mainadmin']), async (
       pushNotification(who, {
         type: `expense${approve ? 'Approval' : 'Pending'}`,
         title: `Expense ${approve ? 'approved' : 'set to pending'}`,
-        body: `${e.category}   ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¹${e.amount}`,
+        body: `${e.category}   ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¹${e.amount}`,
         data: { id: e.id, category: e.category, approved: approve },
       });
     }
@@ -997,7 +996,7 @@ app.post('/admin/donations/:id/approve', authRole(['admin', 'mainadmin']), async
         pushNotification(donorUser, {
           type: 'donationApproval',
           title: 'Donation approved',
-          body: `Receipt: ${rcOut || 'N/A'}   Event: ${out.category}   Amount: ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¹${pgNum(out.amount)}`,
+          body: `Receipt: ${rcOut || 'N/A'}   Event: ${out.category}   Amount: ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¹${pgNum(out.amount)}`,
           data: { receiptCode: rcOut || null, category: out.category, amount: out.amount, paymentMethod: out.paymentMethod, approved: true },
         });
       }
@@ -1337,7 +1336,7 @@ app.post('/gallery/folders/:slug/reorder', authRole(['admin', 'mainadmin']), asy
   }
 });
 
-// Rename folder (create new row, move images, delete old ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â safe without ON UPDATE CASCADE)
+// Rename folder (create new row, move images, delete old ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â safe without ON UPDATE CASCADE)
 app.post('/gallery/folders/:slug/rename', authRole(['admin', 'mainadmin']), async (req, res) => {
   try {
     await ensureGalleryTables();
