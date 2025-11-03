@@ -2311,30 +2311,3 @@ app.get('/public/categories', authOptional, async (req, res) => {
   }
 });
 app.post("/admin/categories/create", authRole(["admin","mainadmin"]), createCategoryHandler);
-
-
-
-// ===== Categories: admin toggle (no body required) =====
-async function catToggleHandler(req, res) {
-  try {
-    await ensureCategoriesTable();
-    const id = req.params?.id;
-    if (!id) return res.status(400).json({ error: 'id required' });
-    const { rows } = await pool.query(
-      'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id= RETURNING id,name,enabled,created_at',
-      [id]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'category not found' });
-    const r = rows[0];
-    return res.json({ ok: true, toggled: true, category: { id: r.id, name: r.name, enabled: r.enabled, createdAt: r.created_at } });
-  } catch (e) {
-    console.error('categories toggle error:', e);
-    return res.status(500).send('Toggle failed');
-  }
-}
-
-// Map to multiple paths (admin-only)
-app.post('/api/admin/categories/:id/toggle', authRole(['admin','mainadmin']), catToggleHandler);
-app.put('/api/admin/categories/:id/toggle', authRole(['admin','mainadmin']), catToggleHandler);
-app.post('/admin/categories/:id/toggle', authRole(['admin','mainadmin']), catToggleHandler);
-app.post('/api/categories/:id/toggle', authRole(['admin','mainadmin']), catToggleHandler);
