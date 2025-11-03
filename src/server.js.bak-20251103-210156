@@ -13,10 +13,11 @@ const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 
 const app = express();
-
+app.use(cors());
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
 /* ===== MW: Categories GET interceptor (adds isEnabled alias; unifies output) ===== */
-
-async function catListInterceptor(req, res, next) {
+app.use('/api/categories', authRole(['user','admin','mainadmin']), async function catListInterceptor(req, res, next) {
   
 
 
