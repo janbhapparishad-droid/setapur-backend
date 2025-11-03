@@ -1,23 +1,23 @@
-﻿{
-    "name":  "setapur-api",
-    "version":  "1.0.0",
-    "main":  "server.js",
-    "type":  "commonjs",
-    "scripts":  {
-                    "start":  "node scripts/analytics-migrate.js || echo \u0027migration: continuing\u0027 ; node --check src/server.js \u0026\u0026 node src/server.js"
-                },
-    "dependencies":  {
-                         "bcryptjs":  "^2.4.3",
-                         "body-parser":  "^1.20.3",
-                         "cloudinary":  "^1.41.3",
-                         "cors":  "^2.8.5",
-                         "express":  "^4.21.2",
-                         "jsonwebtoken":  "^9.0.2",
-                         "multer":  "^1.4.5-lts.1",
-                         "multer-storage-cloudinary":  "^4.0.0",
-                         "pg":  "^8.16.3"
-                     },
-    "engines":  {
-                    "node":  "22.x"
-                }
+{
+    "name": "setapur-api",
+    "version": "1.0.0",
+    "main": "server.js",
+    "type": "commonjs",
+    "scripts": {
+        "start": "node scripts/analytics-migrate.js || echo 'migration: continuing' ; node --check src/server.js && node src/server.js"
+    },
+    "dependencies": {
+        "bcryptjs": "^2.4.3",
+        "body-parser": "^1.20.3",
+        "cloudinary": "^1.41.3",
+        "cors": "^2.8.5",
+        "express": "^4.21.2",
+        "jsonwebtoken": "^9.0.2",
+        "multer": "^1.4.5-lts.1",
+        "multer-storage-cloudinary": "^4.0.0",
+        "pg": "^8.16.3"
+    },
+    "engines": {
+        "node": "22.x"
+    }
 }
