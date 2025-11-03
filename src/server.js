@@ -40,3 +40,4 @@
 
 // touch: categories-create-override " + (Get-Date -Format s) + @"
 try { require('./routes/categoriesOverride')(app, pool, ensureCategoriesTable, authRole, authOptional); } catch (e) { console.warn('categories override not mounted:', e.message); }
+try { require('./routes/categoriesOverride')(app, pool, ensureCategoriesTable, authRole, authOptional); } catch (e) { console.warn('categories override not mounted:', e.message); }

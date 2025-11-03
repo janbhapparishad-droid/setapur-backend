@@ -23,7 +23,7 @@
     }
   }
 
-  // Mount create on multiple paths to avoid FE mismatch
+  // Create on multiple paths (alias friendly)
   ['/api/admin/categories', '/api/admin/categories/create', '/api/admin/categories/create-safe'].forEach((p) => {
     app.post(p, authRole(['admin','mainadmin']), createCategory);
   });
