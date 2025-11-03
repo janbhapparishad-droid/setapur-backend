@@ -1,4 +1,4 @@
-﻿/* --- server.js (Cleaned & fixed) --- */
+/* --- server.js (Cleaned & fixed) --- */
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -13,35 +13,56 @@ const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 
 const app = express();
+app.use(cors());
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
+/* ===== MW: Admin PUT no-body toggle for /api/admin/categories/:id ===== */
+app.use(async function adminCatsPutToggleMw(req, res, next) {
+  try {
+    if (req.method !== 'PUT') return next();
+    // Only match: /api/admin/categories/:id (exact, no suffix path)
+    const m = req.path && req.path.match(/^\/api\/admin\/categories\/(\d+)$/i);
+    if (!m) return next();
 
-/* ===== MW: Categories GET interceptor (adds isEnabled alias; unifies output) ===== */
+    const hasName = (typeof req.body?.name === 'string' && req.body.name.trim())
+                 || (typeof req.body?.newName === 'string' && req.body.newName.trim())
+                 || (typeof req.query?.name === 'string' && req.query.name.trim())
+                 || (typeof req.query?.newName === 'string' && req.query.newName.trim());
+    const hasEnabled = (req.body?.enabled !== undefined) || (req.query?.enabled !== undefined);
 
-async function catListInterceptor(req, res, next) {
-  
+    // If any field provided, let normal handler proceed
+    if (hasName || hasEnabled) return next();
 
+    await ensureCategoriesTable();
+    const id = m[1];
+    const { rows } = await pool.query(
+      'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at',
+      [id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'category not found' });
 
     const r = rows[0];
-    return res.json({ ok: true, toggled: true, category: rowToCategory(r) });
+    return res.json({ ok: true, toggled: true, category: { id: r.id, name: r.name, enabled: r.enabled, createdAt: r.created_at } });
   } catch (e) {
     console.error('admin PUT toggle mw error:', e);
     return res.status(500).send('Category toggle failed');
-
-
+  }
+});
 
 
 // Request log
 app.use((req, res, next) => {
   console.log(new Date().toISOString(), req.method, req.originalUrl);
   next();
-
+});
 
 // Dev helper: allow ?token=...
 app.use((req, res, next) => {
   if (!req.headers.authorization && req.query && req.query.token) {
     req.headers.authorization = `Bearer ${req.query.token}`;
-
+  }
   next();
-
+});
 
 // Static (compat; Cloudinary is primary now)
 const uploadsDir = path.join(process.cwd(), 'uploads');
@@ -53,18 +74,18 @@ const useSSL = !!(
   (process.env.DATABASE_URL && /sslmode=require|neon|render|amazonaws|\.neon\.tech/i.test(process.env.DATABASE_URL))
   || process.env.PGSSL === '1'
   || process.env.PGSSLMODE === 'require'
-
+);
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: useSSL ? { rejectUnauthorized: false } : false,
-
+});
 
 /* ===================== Cloudinary ===================== */
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key:    process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
-
+});
 
 /* ===================== Auth helpers ===================== */
 const SECRET_KEY = process.env.JWT_SECRET || 'your_secret_key_here';
@@ -79,9 +100,10 @@ function authOptional(req, res, next) {
       verified.role = normRole(verified.role);
       verified.username = String(verified.username || '');
       req.user = verified;
-
+    }
   } catch (_) { /* ignore bad/missing token */ }
   next();
+}
 
 function authRole(roles) {
   const allowed = (Array.isArray(roles) ? roles : [roles]).map(normRole);
@@ -102,13 +124,16 @@ function authRole(roles) {
         const u = users.find(u => String(u.username) === req.user.username);
         if (u && (u.banned === true || u.banned === 'true' || u.banned === 1 || u.banned === '1')) {
           return res.status(403).send('User banned');
-
+        }
       } catch (_) {}
 
       next();
     } catch (err) {
       if (err.name === 'TokenExpiredError') return res.status(401).send('Token expired');
       return res.status(400).send('Invalid Token');
+    }
+  };
+}
 
 /* ====== Minimal Analytics Admin helpers (DB) to avoid missing refs ====== */
 global.AnalyticsAdmin = global.AnalyticsAdmin || {};
@@ -122,7 +147,7 @@ if (!global.AnalyticsAdmin.ensure) {
         enabled BOOLEAN DEFAULT TRUE,
         order_index INT DEFAULT 0,
         created_at TIMESTAMPTZ DEFAULT now()
-
+      );
       CREATE TABLE IF NOT EXISTS analytics_events (
         id SERIAL PRIMARY KEY,
         folder_id INT REFERENCES analytics_folders(id) ON DELETE CASCADE,
@@ -132,12 +157,13 @@ if (!global.AnalyticsAdmin.ensure) {
         show_expense_detail BOOLEAN DEFAULT TRUE,
         order_index INT DEFAULT 0,
         created_at TIMESTAMPTZ DEFAULT now()
-
+      );
       CREATE INDEX IF NOT EXISTS idx_analytics_folders_order ON analytics_folders(order_index, lower(name));
       CREATE INDEX IF NOT EXISTS idx_analytics_events_folder ON analytics_events(folder_id);
       CREATE INDEX IF NOT EXISTS idx_analytics_events_order ON analytics_events(folder_id, order_index);
     `);
-
+  };
+}
 if (!global.AnalyticsAdmin.reorderFolders) {
   global.AnalyticsAdmin.reorderFolders = async function reorderFolders(folderId, direction, newIndex) {
     const { rows } = await pool.query('SELECT id FROM analytics_folders ORDER BY order_index ASC, lower(name) ASC');
@@ -151,10 +177,12 @@ if (!global.AnalyticsAdmin.reorderFolders) {
       [list[idx-1], list[idx]] = [list[idx], list[idx-1]];
     } else if (direction === 'down' && idx < list.length - 1) {
       [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
-
+    }
     for (let i=0;i<list.length;i++) {
       await pool.query('UPDATE analytics_folders SET order_index=$1 WHERE id=$2', [i, list[i]]);
-
+    }
+  };
+}
 if (!global.AnalyticsAdmin.reorderEvents) {
   global.AnalyticsAdmin.reorderEvents = async function reorderEvents(folderId, eventId, direction, newIndex) {
     const { rows } = await pool.query('SELECT id FROM analytics_events WHERE folder_id=$1 ORDER BY order_index ASC, id ASC', [folderId]);
@@ -168,9 +196,12 @@ if (!global.AnalyticsAdmin.reorderEvents) {
       [list[idx-1], list[idx]] = [list[idx], list[idx-1]];
     } else if (direction === 'down' && idx < list.length - 1) {
       [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
-
+    }
     for (let i=0;i<list.length;i++) {
       await pool.query('UPDATE analytics_events SET order_index=$1 WHERE id=$2', [i, list[i]]);
+    }
+  };
+}
 
 /* ===================== Common helpers ===================== */
 function slugify(s) {
@@ -180,19 +211,19 @@ function slugify(s) {
     .replace(/[^a-z0-9\s-]/g, '')
     .replace(/\s+/g, '-')
     .replace(/-+/g, '-');
-
+}
 function pushNotification(_username, _notif) {
   // no-op
-
+}
 const SENSITIVE_KEYS = ['screenshotUrl', 'screenshotPath', 'paymentScreenshot', 'screenshot', 'cashReceiverName', 'receiverName', 'receivedBy'];
 function isApproved(d) { return d && (d.approved === true || d.approved === 'true' || d.approved === 1 || d.approved === '1'); }
 function redactDonationForRole(d, role) {
   const out = { ...d };
   if (isApproved(out) && role !== 'mainadmin') {
     SENSITIVE_KEYS.forEach((k) => { if (k in out) delete out[k]; });
-
+  }
   return out;
-
+}
 const ALPHA = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 const DIGITS = '0123456789';
 const ALNUM = ALPHA + DIGITS;
@@ -203,9 +234,9 @@ function generate6CharAlnumMix() {
   for (let i = arr.length - 1; i > 0; i--) {
     const j = crypto.randomInt(0, i + 1);
     [arr[i], arr[j]] = [arr[j], arr[i]];
-
+  }
   return arr.join('');
-
+}
 function pgNum(x) { const n = Number(x); return Number.isFinite(n) ? n : 0; }
 
 /* ===================== Users (Postgres) ===================== */
@@ -222,10 +253,10 @@ async function ensureUsersTable() {
       display_name TEXT,
       logged_in TEXT,
       created_at TIMESTAMPTZ DEFAULT now()
-
+    );
   `);
   console.log('DB ready: users table ensured');
-
+}
 function rowToUser(r) {
   return {
     id: r.id,
@@ -238,7 +269,8 @@ function rowToUser(r) {
     displayName: r.display_name || null,
     loggedIn: r.logged_in || null,
     createdAt: r.created_at,
-
+  };
+}
 async function getUsers() {
   await ensureUsersTable();
   const { rows } = await pool.query(`
@@ -246,7 +278,7 @@ async function getUsers() {
     FROM users ORDER BY id ASC
   `);
   return rows.map(rowToUser);
-
+}
 async function saveUsers(users) {
   await ensureUsersTable();
   if (!Array.isArray(users)) return;
@@ -255,7 +287,7 @@ async function saveUsers(users) {
     if (u.password && String(u.password).trim()) {
       passwordHash = bcrypt.hashSync(u.password, 10);
       delete u.password;
-
+    }
     await pool.query(
       `INSERT INTO users (username, password_hash, role, banned, name, full_name, display_name, logged_in)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
@@ -277,7 +309,9 @@ async function saveUsers(users) {
         u.displayName || null,
         u.loggedIn || null,
       ]
-
+    );
+  }
+}
 async function seedAdmin() {
   try {
     const users = await getUsers();
@@ -304,10 +338,11 @@ async function seedAdmin() {
       console.log(`Reset admin user '${username}'`);
     } else {
       console.log(`Admin user '${username}' already exists; skipping seed`);
-
+    }
   } catch (e) {
     console.warn('Admin seed skipped:', e.message);
-
+  }
+}
 
 /* ===================== Auth: Login ===================== */
 app.post('/auth/login', async (req, res) => {
@@ -339,7 +374,7 @@ app.post('/admin/users', authRole(['admin','mainadmin']), async (req, res) => {
     const users = await getUsers();
     if (users.find(u => String(u.username).toLowerCase() === usernameIn.toLowerCase())) {
       return res.status(409).json({ error: 'username already exists' });
-
+    }
     const next = users.slice();
     next.push({ username: usernameIn, password: passwordIn, role: roleIn, banned: false });
     await saveUsers(next);
@@ -350,7 +385,7 @@ app.post('/admin/users', authRole(['admin','mainadmin']), async (req, res) => {
   } catch (e) {
     console.error('create user error:', e);
     res.status(500).json({ error: 'Create user failed' });
-
+  }
 });
 
 app.get('/admin/users', authRole(['admin','mainadmin']), async (req, res) => {
@@ -369,7 +404,7 @@ async function ensureExpensesTable() {
       paid_to TEXT,
       date TIMESTAMPTZ,
       created_at TIMESTAMPTZ DEFAULT now()
-
+    );
   `);
   await pool.query(`
     ALTER TABLE expenses
@@ -386,7 +421,7 @@ async function ensureExpensesTable() {
     CREATE INDEX IF NOT EXISTS idx_expenses_approved_enabled ON expenses (approved, enabled);
   `);
   console.log('DB ready: expenses');
-
+}
 async function ensureDonationsTable() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS donations (
@@ -404,7 +439,7 @@ async function ensureDonationsTable() {
       screenshot_url TEXT,
       receipt_code TEXT UNIQUE,
       created_at TIMESTAMPTZ DEFAULT now()
-
+    );
   `);
   await pool.query(`
     ALTER TABLE donations
@@ -419,14 +454,14 @@ async function ensureDonationsTable() {
     CREATE INDEX IF NOT EXISTS idx_donations_created ON donations (created_at);
   `);
   console.log('DB ready: donations');
-
+}
 async function ensureGalleryTables() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS gallery_folders (
       slug TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       enabled BOOLEAN DEFAULT TRUE
-
+    );
   `);
   await pool.query(`
     ALTER TABLE gallery_folders
@@ -443,7 +478,7 @@ async function ensureGalleryTables() {
       public_id TEXT UNIQUE NOT NULL,
       url TEXT NOT NULL,
       filename TEXT NOT NULL
-
+    );
   `);
   await pool.query(`
     ALTER TABLE gallery_images
@@ -455,14 +490,14 @@ async function ensureGalleryTables() {
     CREATE INDEX IF NOT EXISTS idx_gallery_images_enabled ON gallery_images (enabled);
   `);
   console.log('DB ready: gallery');
-
+}
 async function ensureEbooksTables() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS ebook_folders (
       slug TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       enabled BOOLEAN DEFAULT TRUE
-
+    );
   `);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS ebook_files (
@@ -471,7 +506,7 @@ async function ensureEbooksTables() {
       public_id TEXT UNIQUE NOT NULL,
       url TEXT NOT NULL,
       filename TEXT NOT NULL
-
+    );
   `);
   await pool.query(`
     ALTER TABLE ebook_files
@@ -483,7 +518,7 @@ async function ensureEbooksTables() {
     CREATE INDEX IF NOT EXISTS idx_ebook_files_enabled ON ebook_files (enabled);
   `);
   console.log('DB ready: ebooks');
-
+}
 async function ensureCategoriesTable() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS categories (
@@ -491,9 +526,10 @@ async function ensureCategoriesTable() {
       name TEXT UNIQUE NOT NULL,
       enabled BOOLEAN DEFAULT TRUE,
       created_at TIMESTAMPTZ DEFAULT now()
-
+    );
   `);
   console.log('DB ready: categories');
+}
 
 /* ===================== Categories (DB) + FE aliases ===================== */
 const listCategoriesHandler = async (req, res) => {
@@ -507,11 +543,12 @@ const listCategoriesHandler = async (req, res) => {
     if (!isAdmin && !includeDisabled) sql += ' WHERE enabled = true';
     sql += ' ORDER BY lower(name) ASC';
     const { rows } = await pool.query(sql);
-    res.json(rows.map(rowToCategory));
+    res.json(rows);
   } catch (e) {
     console.error('categories list error:', e);
     res.status(500).send('Failed to list categories');
-
+  }
+};
 const createCategoryHandler = async (req, res) => {
   try {
     await ensureCategoriesTable();
@@ -523,13 +560,14 @@ const createCategoryHandler = async (req, res) => {
     const { rows } = await pool.query(
       'INSERT INTO categories(name, enabled) VALUES ($1, TRUE) ON CONFLICT (name) DO NOTHING RETURNING id, name, enabled, created_at',
       [nm]
-
+    );
     if (!rows.length) return res.status(409).json({ error: 'category already exists' });
-    return res.status(201).json(rowToCategory(rows[0]));
+    return res.status(201).json(rows[0]);
   } catch (e) {
     console.error('categories create error:', e);
     return res.status(500).json({ error: 'Create failed', code: e.code || null, detail: e.message || String(e) });
-
+  }
+};
 app.get('/api/categories', authRole(['user','admin','mainadmin']), listCategoriesHandler);
 app.post('/api/categories', authRole(['admin','mainadmin']), createCategoryHandler);
 // FE aliases
@@ -555,6 +593,8 @@ function rowToExpense(r) {
     approvedBy: r.approved_by,
     approvedById: r.approved_by_id,
     approvedAt: r.approved_at
+  };
+}
 
 app.get('/api/expenses/list', authRole(['user','admin','mainadmin']), async (req, res) => {
   try {
@@ -593,17 +633,18 @@ app.get('/api/expenses/list', authRole(['user','admin','mainadmin']), async (req
         let mineWhere = where.length ? ' AND ' + where.join(' AND ') : '';
         const { rows: mine } = await pool.query(
           `SELECT * FROM expenses WHERE submitted_by = $${mineVals.length} AND approved = false${mineWhere}`, mineVals
-
+        );
         const seen = new Set(list.map(x=>x.id));
         for (const r of mine) { if (!seen.has(r.id)) list.push(rowToExpense(r)); }
+      }
 
       list.sort((a,b)=> new Date(b.date||b.createdAt) - new Date(a.date||a.createdAt));
       return res.json(list);
-
+    }
   } catch (e) {
     console.error('list expenses error:', e);
     res.status(500).send('Failed to list expenses');
-
+  }
 });
 
 app.post('/api/expenses/submit', authRole(['user','admin','mainadmin']), async (req, res) => {
@@ -619,7 +660,7 @@ app.post('/api/expenses/submit', authRole(['user','admin','mainadmin']), async (
       `INSERT INTO expenses (amount, category, description, paid_to, date, created_at, updated_at, enabled, approved, status, submitted_by, submitted_by_id)
        VALUES ($1,$2,$3,$4,$5,$6,$6,true,false,'pending',$7,$8) RETURNING *`,
       [amt, cat, (description||'').trim(), (paidTo||'').trim(), date ? new Date(date) : now, now, req.user?.username || null, req.user?.id || null]
-
+    );
     const e = rowToExpense(rows[0]);
     if (e.submittedBy) {
       pushNotification(e.submittedBy, {
@@ -628,12 +669,12 @@ app.post('/api/expenses/submit', authRole(['user','admin','mainadmin']), async (
         body: `${e.category}   ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¹${e.amount} (pending approval)`,
         data: { id: e.id, category: e.category, amount: e.amount, approved: false },
       });
-
+    }
     res.status(201).json({ message: 'Expense submitted (pending)', expense: e });
   } catch (err) {
     console.error('submit expense error:', err);
     res.status(500).send('Submit expense failed');
-
+  }
 });
 
 app.post('/api/expenses', authRole(['admin','mainadmin']), async (req, res) => {
@@ -654,12 +695,12 @@ app.post('/api/expenses', authRole(['admin','mainadmin']), async (req, res) => {
       [amt, cat, (description||'').trim(), (paidTo||'').trim(), date ? new Date(date) : now, now,
        approve, (approve ? 'approved' : 'pending'), req.user?.username || null, req.user?.id || null,
        approve ? req.user?.username : null, approve ? req.user?.id : null, approve ? now : null]
-
+    );
     res.status(201).json({ message: 'Expense created', expense: rowToExpense(rows[0]) });
   } catch (err) {
     console.error('create expense error:', err);
     res.status(500).send('Create expense failed');
-
+  }
 });
 
 app.put('/api/expenses/:id', authRole(['admin','mainadmin']), async (req, res) => {
@@ -673,7 +714,7 @@ app.put('/api/expenses/:id', authRole(['admin','mainadmin']), async (req, res) =
       const amt = Number(body.amount);
       if (!Number.isFinite(amt)) return res.status(400).json({ error: 'amount must be a number' });
       fields.push(`amount = $${idx++}`); vals.push(amt);
-
+    }
     if (typeof body.category === 'string') { fields.push(`category = $${idx++}`); vals.push(body.category.trim()); }
     if (typeof body.description === 'string') { fields.push(`description = $${idx++}`); vals.push(body.description.trim()); }
     if (typeof body.paidTo === 'string') { fields.push(`paid_to = $${idx++}`); vals.push(body.paidTo.trim()); }
@@ -686,11 +727,12 @@ app.put('/api/expenses/:id', authRole(['admin','mainadmin']), async (req, res) =
       if (!cur.length) return res.status(404).json({ error: 'category not found' });
       const { rows } = await pool.query('UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at', [id]);
       const r = rows[0];
-      return res.json({ ok: true, toggled: true, category: rowToCategory(r) });
+      return res.json({ ok: true, toggled: true, category: { id: r.id, name: r.name, enabled: r.enabled, createdAt: r.created_at } });
     } catch (e) {
       console.error('categories PUT/PATCH toggle error:', e);
       return res.status(500).send('Category toggle failed');
-
+    }
+  }
 
     fields.push(`updated_at = now()`);
     vals.push(id);
@@ -701,7 +743,7 @@ app.put('/api/expenses/:id', authRole(['admin','mainadmin']), async (req, res) =
   } catch (err) {
     console.error('update expense error:', err);
     res.status(500).send('Update expense failed');
-
+  }
 });
 
 app.post('/api/expenses/:id/enable', authRole(['admin','mainadmin']), async (req, res) => {
@@ -712,13 +754,13 @@ app.post('/api/expenses/:id/enable', authRole(['admin','mainadmin']), async (req
     const enabled = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
     const { rows } = await pool.query(
       `UPDATE expenses SET enabled=$1, updated_at=now() WHERE id=$2 RETURNING *`, [enabled, id]
-
+    );
     if (!rows.length) return res.status(404).json({ error: 'Expense not found' });
     res.json({ ok: true, expense: rowToExpense(rows[0]) });
   } catch (e) {
     console.error('enable expense error:', e);
     res.status(500).send('Failed to enable/disable expense');
-
+  }
 });
 
 app.post('/admin/expenses/:id/approve', authRole(['admin','mainadmin']), async (req, res) => {
@@ -732,7 +774,7 @@ app.post('/admin/expenses/:id/approve', authRole(['admin','mainadmin']), async (
       `UPDATE expenses SET approved=$1, status=$2, approved_by=$3, approved_by_id=$4, approved_at=$5, updated_at=now()
        WHERE id=$6 RETURNING *`,
       [approve, approve ? 'approved' : 'pending', req.user.username, req.user.id, approve ? new Date() : null, id]
-
+    );
     if (!rows.length) return res.status(404).json({ error: 'Expense not found' });
 
     const e = rowToExpense(rows[0]);
@@ -744,12 +786,12 @@ app.post('/admin/expenses/:id/approve', authRole(['admin','mainadmin']), async (
         body: `${e.category}   ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¹${e.amount}`,
         data: { id: e.id, category: e.category, approved: approve },
       });
-
+    }
     res.json({ message: `Expense ${approve ? 'approved' : 'set to pending'}`, expense: e });
   } catch (e) {
     console.error('approve expense error:', e);
     res.status(500).send('Approval failed');
-
+  }
 });
 
 app.delete('/api/expenses/:id', authRole(['admin','mainadmin']), async (req, res) => {
@@ -762,7 +804,7 @@ app.delete('/api/expenses/:id', authRole(['admin','mainadmin']), async (req, res
   } catch (err) {
     console.error('delete expense error:', err);
     res.status(500).send('Delete expense failed');
-
+  }
 });
 
 /* ===================== Donations (Postgres + Cloudinary screenshot) ===================== */
@@ -775,14 +817,14 @@ const uploadDonation = multer({ storage: donationScreenshotStorage, limits: { fi
 async function receiptCodeExists(code) {
   const { rows } = await pool.query(
     'SELECT 1 FROM donations WHERE upper(receipt_code) = upper($1) LIMIT 1', [code]
-
+  );
   return rows.length > 0;
-
+}
 async function generateUniqueReceiptCodeDB() {
   let code, tries=0;
   do { code = generate6CharAlnumMix(); tries++; } while (tries<1000 && await receiptCodeExists(code));
   return code;
-
+}
 function rowToDonation(r) {
   return {
     id: r.id,
@@ -806,6 +848,8 @@ function rowToDonation(r) {
     approvedByRole: r.approved_by_role,
     approvedByName: r.approved_by_name,
     approvedAt: r.approved_at
+  };
+}
 
 async function createDonationHandler(req, res) {
   try {
@@ -826,23 +870,25 @@ async function createDonationHandler(req, res) {
        RETURNING *`,
       [req.user.id, req.user.username, String(donorName).trim(), Number(amount), paymentMethod, category,
        cashReceiverName || null, screenshotPublicId, screenshotUrl, code]
-
+    );
     res.status(201).json({ message: 'Donation submitted', donation: rowToDonation(rows[0]) });
   } catch (err) {
     console.error('submit-donation error:', err);
     res.status(500).send('Failed to submit donation');
-
+  }
+}
 
 app.post('/api/donations/submit-donation',
   authRole(['user','admin','mainadmin']),
   uploadDonation.single('screenshot'),
   createDonationHandler
-
+);
 // Alias direct to same handler
 app.post('/api/donations/create',
   authRole(['user','admin','mainadmin']),
   uploadDonation.single('screenshot'),
   createDonationHandler
+);
 
 app.get('/myaccount/receipts', authRole(['user','admin','mainadmin']), async (req, res) => {
   await ensureDonationsTable();
@@ -851,7 +897,7 @@ app.get('/myaccount/receipts', authRole(['user','admin','mainadmin']), async (re
     `SELECT * FROM donations WHERE approved = true AND (
       donor_username = $1 OR donor_name = $1
     ) ORDER BY created_at DESC`, [username]
-
+  );
   res.json(rows.map(rowToDonation));
 });
 
@@ -870,10 +916,11 @@ app.get('/api/donations/donations', authRole(['user','admin','mainadmin']), asyn
             OR lower(coalesce(receipt_code,'')) ILIKE lower($1)
             OR lower(coalesce(category,'')) ILIKE lower($1)`;
       vals = [`%${q}%`];
-
+    }
     sql += ' ORDER BY created_at DESC';
     const { rows } = await pool.query(sql, vals);
     return res.json(rows.map(r => redactDonationForRole(rowToDonation(r), role)));
+  }
 
   // mine
   let where = ` WHERE (donor_username = $1 OR donor_name = $1)`;
@@ -885,7 +932,7 @@ app.get('/api/donations/donations', authRole(['user','admin','mainadmin']), asyn
                 OR lower(coalesce(receipt_code,'')) ILIKE lower($2)
                 OR lower(coalesce(category,'')) ILIKE lower($2))`;
     vals.push(`%${q}%`);
-
+  }
   const sql = 'SELECT * FROM donations' + where + ' ORDER BY created_at DESC';
   const { rows } = await pool.query(sql, vals);
   res.json(rows.map(r => redactDonationForRole(rowToDonation(r), role)));
@@ -903,7 +950,7 @@ app.get('/api/donations/all-donations', authRole(['admin', 'mainadmin']), async 
           OR lower(coalesce(receipt_code,'')) ILIKE lower($1)
           OR lower(coalesce(category,'')) ILIKE lower($1)`;
     vals = [`%${q}%`];
-
+  }
   sql += ' ORDER BY created_at DESC';
   const { rows } = await pool.query(sql, vals);
   res.json(rows.map(r => redactDonationForRole(rowToDonation(r), role)));
@@ -940,13 +987,13 @@ app.get('/api/donations/search', authRole(['user','admin','mainadmin']), async (
                   OR lower(coalesce(category,'')) ILIKE lower($1))
              ORDER BY created_at DESC LIMIT 100`;
       vals = [like, req.user.username];
-
+    }
     const { rows } = await pool.query(sql, vals);
     res.json(rows.map(r => redactDonationForRole(rowToDonation(r), role)));
   } catch (e) {
     console.error('donation search error:', e);
     res.status(500).send('Search failed');
-
+  }
 });
 
 app.get('/admin/donations/pending', authRole(['admin', 'mainadmin']), async (req, res) => {
@@ -986,7 +1033,7 @@ app.post('/admin/donations/:id/approve', authRole(['admin', 'mainadmin']), async
        WHERE id=$6
        RETURNING *`,
       [req.user.username, req.user.id, req.user.role, approvedByName, rc, id]
-
+    );
     const out = rowToDonation(upd[0]);
 
     if (!alreadyApproved) {
@@ -999,13 +1046,14 @@ app.post('/admin/donations/:id/approve', authRole(['admin', 'mainadmin']), async
           body: `Receipt: ${rcOut || 'N/A'}   Event: ${out.category}   Amount: ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¹${pgNum(out.amount)}`,
           data: { receiptCode: rcOut || null, category: out.category, amount: out.amount, paymentMethod: out.paymentMethod, approved: true },
         });
-
+      }
+    }
 
     res.json({ message: 'Donation approved', donation: out });
   } catch (err) {
     console.error('admin approve error:', err);
     return res.status(500).send('Approval failed');
-
+  }
 });
 
 app.post('/admin/donations/:id/disapprove', authRole(['admin', 'mainadmin']), async (req, res) => {
@@ -1016,13 +1064,13 @@ app.post('/admin/donations/:id/disapprove', authRole(['admin', 'mainadmin']), as
       `UPDATE donations SET approved=false, status='pending',
        approved_by=NULL, approved_by_id=NULL, approved_by_role=NULL, approved_by_name=NULL, approved_at=NULL, updated_at=now()
        WHERE id=$1 RETURNING *`, [id]
-
+    );
     if (!rows.length) return res.status(404).json({ error: 'Donation not found' });
     res.json({ message: 'Donation set to pending', donation: rowToDonation(rows[0]) });
   } catch (err) {
     console.error('admin disapprove error:', err);
     return res.status(500).send('Disapprove failed');
-
+  }
 });
 
 async function handleDonationUpdate(req, res) {
@@ -1037,7 +1085,7 @@ async function handleDonationUpdate(req, res) {
       const amt = Number(body.amount);
       if (!Number.isFinite(amt)) return res.status(400).json({ error: 'amount must be a number' });
       fields.push(`amount = $${idx++}`); vals.push(amt);
-
+    }
     if (typeof body.donorName === 'string') { fields.push(`donor_name = $${idx++}`); vals.push(body.donorName.trim()); }
     if (typeof body.category === 'string') { fields.push(`category = $${idx++}`); vals.push(body.category.trim()); }
     if (typeof body.paymentMethod === 'string') { fields.push(`payment_method = $${idx++}`); vals.push(body.paymentMethod.trim()); }
@@ -1051,10 +1099,11 @@ async function handleDonationUpdate(req, res) {
       const { rows: dup } = await pool.query('SELECT 1 FROM donations WHERE upper(receipt_code) = upper($1) AND id <> $2 LIMIT 1', [rc, id]);
       if (dup.length) return res.status(409).json({ error: 'receiptCode already exists' });
       fields.push(`receipt_code = $${idx++}`); vals.push(rc);
-
+    }
     if (body.regenerateReceiptCode === true || body.regenerateReceiptCode === 'true') {
       const rc = await generateUniqueReceiptCodeDB();
       fields.push(`receipt_code = $${idx++}`); vals.push(rc);
+    }
 
     fields.push(`updated_at = now()`);
     vals.push(id);
@@ -1065,8 +1114,8 @@ async function handleDonationUpdate(req, res) {
   } catch (e) {
     console.error('update donation error:', e);
     res.status(500).send('Update donation failed');
-
-
+  }
+}
 app.put('/admin/donations/:id', authRole(['admin', 'mainadmin']), handleDonationUpdate);
 app.put('/api/donations/:id', authRole(['admin', 'mainadmin']), handleDonationUpdate);
 
@@ -1087,7 +1136,7 @@ const uploadGalleryCloud = multer({
         public_id: `${Date.now()}-${Math.round(Math.random()*1e9)}-${safeBase}`,
         allowed_formats: ['jpg','jpeg','png','webp','gif'],
         resource_type: 'image'
-
+      };
     },
   }),
   limits: { fileSize: 20 * 1024 * 1024, files: 25 },
@@ -1102,12 +1151,14 @@ async function ensureGalleryFolder(slug, name) {
      VALUES ($1,$2,true, COALESCE((SELECT COALESCE(MAX(order_index),-1)+1 FROM gallery_folders),0))
      ON CONFLICT (slug) DO NOTHING`,
     [s, n]
+  );
+}
 
 async function reorderGalleryImages(folderSlug, targetIdOrName, direction, newIndex) {
   const { rows } = await pool.query(
     'SELECT id, filename FROM gallery_images WHERE folder_slug=$1 ORDER BY order_index ASC, id ASC',
     [folderSlug]
-
+  );
   let list = rows.map(r => ({ id: r.id, name: r.filename }));
   let idx = list.findIndex(x => String(x.id) === String(targetIdOrName) || String(x.name) === String(targetIdOrName));
   if (idx === -1) return;
@@ -1119,15 +1170,16 @@ async function reorderGalleryImages(folderSlug, targetIdOrName, direction, newIn
     [list[idx-1], list[idx]] = [list[idx], list[idx-1]];
   } else if (direction === 'down' && idx >= 0 && idx < list.length - 1) {
     [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
-
+  }
   for (let i=0;i<list.length;i++) {
     await pool.query('UPDATE gallery_images SET order_index=$1 WHERE id=$2', [i, list[i].id]);
-
+  }
+}
 
 async function reorderGalleryFolders(slug, direction, newIndex) {
   const { rows } = await pool.query(
     'SELECT slug FROM gallery_folders ORDER BY order_index ASC, lower(name) ASC'
-
+  );
   let list = rows.map(r => r.slug);
   let idx = list.indexOf(slug);
   if (idx === -1) return;
@@ -1138,10 +1190,11 @@ async function reorderGalleryFolders(slug, direction, newIndex) {
     [list[idx-1], list[idx]] = [list[idx], list[idx-1]];
   } else if (direction === 'down' && idx >= 0 && idx < list.length - 1) {
     [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
-
+  }
   for (let i=0;i<list.length;i++) {
     await pool.query('UPDATE gallery_folders SET order_index=$1 WHERE slug=$2', [i, list[i]]);
-
+  }
+}
 
 // List folders
 app.get('/gallery/folders', authRole(['user', 'admin', 'mainadmin']), async (req, res) => {
@@ -1172,7 +1225,7 @@ app.get('/gallery/folders', authRole(['user', 'admin', 'mainadmin']), async (req
   } catch (e) {
     console.error('gallery list error:', e);
     res.status(500).send('Failed to list gallery folders');
-
+  }
 });
 
 // Create folder
@@ -1186,13 +1239,13 @@ app.post('/gallery/folders/create', authRole(['admin', 'mainadmin']), async (req
       `INSERT INTO gallery_folders (slug, name, enabled, order_index)
        VALUES ($1,$2,true, COALESCE((SELECT COALESCE(MAX(order_index),-1)+1 FROM gallery_folders),0))`,
       [slug, String(name).trim()]
-
+    );
     res.status(201).json({ name: String(name).trim(), slug });
   } catch (e) {
     if (String(e.message || '').toLowerCase().includes('duplicate')) return res.status(409).json({ error: 'folder already exists' });
     console.error('gallery create error:', e);
     res.status(500).send('Failed to create folder');
-
+  }
 });
 
 // Upload images (folder)
@@ -1214,16 +1267,17 @@ async function insertGalleryUploadsToDB(req, res) {
         `INSERT INTO gallery_images (folder_slug, public_id, url, filename, enabled, order_index, bytes)
          VALUES ($1,$2,$3,$4,true,$5,NULL) RETURNING *`,
         [slug, f.filename, f.path, filename, order++]
-
+      );
       inserted.push(rows[0]);
-
+    }
     res.status(201).json({ uploaded: inserted.map(r => ({ id:r.id, filename:r.filename, url:r.url })), count: inserted.length });
   } catch (e) { console.error('gallery upload error:', e); res.status(500).send('Upload failed'); }
-
+}
 app.post('/gallery/folders/:slug/upload',
   authRole(['admin', 'mainadmin']),
   uploadGalleryCloud.array('images', 25),
   insertGalleryUploadsToDB
+);
 
 // Root images: list
 async function listRootGalleryImages(req, res) {
@@ -1250,8 +1304,8 @@ async function listRootGalleryImages(req, res) {
   } catch (e) {
     console.error('gallery root images error:', e);
     res.status(500).send('Failed to list gallery images');
-
-
+  }
+}
 app.get('/gallery/images', authRole(['user', 'admin', 'mainadmin']), listRootGalleryImages);
 app.get('/gallery/home/images', authRole(['user', 'admin', 'mainadmin']), listRootGalleryImages);
 
@@ -1269,7 +1323,7 @@ app.get('/gallery/folders/:slug/images', authRole(['user', 'admin', 'mainadmin']
     const vals = [slug];
     if (!isAdmin && !includeDisabled) {
       sql += ' AND enabled = true';
-
+    }
     sql += ' ORDER BY order_index ASC, lower(filename) ASC';
     const { rows } = await pool.query(sql, vals);
     res.json(rows.map(r => ({
@@ -1282,7 +1336,7 @@ app.get('/gallery/folders/:slug/images', authRole(['user', 'admin', 'mainadmin']
   } catch (e) {
     console.error('gallery images error:', e);
     res.status(500).send('Failed to list images');
-
+  }
 });
 
 // Enable/disable folder
@@ -1298,7 +1352,7 @@ app.post('/gallery/folders/:slug/enable', authRole(['admin', 'mainadmin']), asyn
   } catch (e) {
     console.error('enable folder error:', e);
     res.status(500).send('Failed to update folder enabled');
-
+  }
 });
 
 // Reorder folders
@@ -1313,7 +1367,7 @@ app.post('/gallery/folders/reorder', authRole(['admin', 'mainadmin']), async (re
   } catch (e) {
     console.error('reorder folders error:', e);
     res.status(500).send('Failed to reorder folders');
-
+  }
 });
 app.post('/gallery/folders/:slug/reorder', authRole(['admin', 'mainadmin']), async (req, res) => {
   try {
@@ -1326,7 +1380,7 @@ app.post('/gallery/folders/:slug/reorder', authRole(['admin', 'mainadmin']), asy
   } catch (e) {
     console.error('reorder folders (param) error:', e);
     res.status(500).send('Failed to reorder folders');
-
+  }
 });
 
 // Rename folder (create new row, move images, delete old ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â safe without ON UPDATE CASCADE)
@@ -1351,12 +1405,12 @@ app.post('/gallery/folders/:slug/rename', authRole(['admin', 'mainadmin']), asyn
       await pool.query(
         'INSERT INTO gallery_folders (slug, name, enabled, order_index, cover_public_id, cover_url, icon_public_id, icon_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (slug) DO NOTHING',
         [newSlug, desired, exists[0].enabled, exists[0].order_index, exists[0].cover_public_id, exists[0].cover_url, exists[0].icon_public_id, exists[0].icon_key]
-
+      );
       await pool.query('UPDATE gallery_images SET folder_slug=$1 WHERE folder_slug=$2', [newSlug, slug]);
       await pool.query('DELETE FROM gallery_folders WHERE slug=$1', [slug]);
     } else {
       await pool.query('UPDATE gallery_folders SET name=$1 WHERE slug=$2', [desired, slug]);
-
+    }
     await pool.query('COMMIT');
 
     res.json({ ok: true, slug: newSlug, name: desired });
@@ -1364,7 +1418,7 @@ app.post('/gallery/folders/:slug/rename', authRole(['admin', 'mainadmin']), asyn
     try { await pool.query('ROLLBACK'); } catch {}
     console.error('rename folder error:', e);
     res.status(500).send('Failed to rename folder');
-
+  }
 });
 
 // Reorder images in folder
@@ -1381,7 +1435,7 @@ app.post('/gallery/folders/:slug/images/reorder', authRole(['admin', 'mainadmin'
   } catch (e) {
     console.error('reorder images error:', e);
     res.status(500).send('Failed to reorder images');
-
+  }
 });
 
 // Enable/disable image
@@ -1402,7 +1456,7 @@ app.post('/gallery/folders/:slug/images/enable', authRole(['admin', 'mainadmin']
   } catch (e) {
     console.error('enable image error:', e);
     res.status(500).send('Failed to update image enabled');
-
+  }
 });
 
 // Rename image (Cloudinary rename + DB update)
@@ -1434,12 +1488,13 @@ app.post('/gallery/folders/:slug/images/rename', authRole(['admin', 'mainadmin']
     const { rows: upd } = await pool.query(
       'UPDATE gallery_images SET public_id=$1, url=$2, filename=$3 WHERE id=$4 RETURNING *',
       [newPublicId, newUrl, `${safeBase}${path.extname(row.filename)}`, row.id]
+    );
 
     res.json({ ok: true, filename: upd[0].filename, url: upd[0].url });
   } catch (e) {
     console.error('rename image error:', e);
     res.status(500).send('Failed to rename image');
-
+  }
 });
 
 // Delete image
@@ -1460,6 +1515,7 @@ app.delete('/gallery/folders/:slug/images', authRole(['admin', 'mainadmin']), as
       const { rows } = await pool.query('SELECT * FROM gallery_images WHERE filename=$1 AND folder_slug=$2', [filename, slug]);
       if (!rows.length) return res.status(404).json({ error: 'image not found' });
       row = rows[0];
+    }
 
     try { await cloudinary.uploader.destroy(row.public_id, { resource_type: 'image' }); } catch (e) { console.warn('cloud delete failed', e.message); }
     await pool.query('DELETE FROM gallery_images WHERE id=$1', [row.id]);
@@ -1467,7 +1523,7 @@ app.delete('/gallery/folders/:slug/images', authRole(['admin', 'mainadmin']), as
   } catch (e) {
     console.error('delete image error:', e);
     res.status(500).send('Failed to delete file');
-
+  }
 });
 
 // Set cover
@@ -1489,7 +1545,7 @@ app.post('/gallery/folders/:slug/cover', authRole(['admin', 'mainadmin']), async
   } catch (e) {
     console.error('set cover error:', e);
     res.status(500).send('Failed to set cover');
-
+  }
 });
 
 // Set/Clear icon
@@ -1502,12 +1558,14 @@ app.post('/gallery/folders/:slug/icon', authRole(['admin', 'mainadmin']), async 
     if (clear === true || clear === 'true' || clear === 1 || clear === '1') {
       await pool.query('UPDATE gallery_folders SET icon_public_id=NULL, icon_key=NULL WHERE slug=$1', [slug]);
       return res.json({ ok: true, slug, iconFile: null, iconKey: null, iconUrl: null });
+    }
 
     if (iconKey && String(iconKey).trim()) {
       const key = String(iconKey).trim();
       if (!ALLOWED_ICON_KEYS.has(key)) return res.status(400).json({ error: 'Invalid iconKey', allowed: Array.from(ALLOWED_ICON_KEYS) });
       await pool.query('UPDATE gallery_folders SET icon_public_id=NULL, icon_key=$1 WHERE slug=$2', [key, slug]);
       return res.json({ ok: true, slug, iconFile: null, iconKey: key, iconUrl: null });
+    }
 
     let row = null;
     if (imageId) {
@@ -1525,7 +1583,7 @@ app.post('/gallery/folders/:slug/icon', authRole(['admin', 'mainadmin']), async 
   } catch (e) {
     console.error('set icon error:', e);
     res.status(500).send('Failed to set icon');
-
+  }
 });
 
 /* ===================== E-Books (Cloudinary raw + Postgres) ===================== */
@@ -1542,7 +1600,7 @@ const uploadEbooksCloud = multer({
         public_id: `${Date.now()}-${Math.round(Math.random()*1e9)}-${safeBase}`,
         resource_type: 'raw',
         allowed_formats: ['pdf']
-
+      };
     },
   }),
   limits: { fileSize: 100 * 1024 * 1024, files: 25 },
@@ -1568,12 +1626,12 @@ app.get('/ebooks/folders', authRole(['user','admin','mainadmin']), async (req, r
         fileCount: cnt[0].c,
         enabled: f.enabled !== false
       });
-
+    }
     res.json(out);
   } catch (e) {
     console.error('ebooks folders error:', e);
     res.status(500).send('Failed to list e-book folders');
-
+  }
 });
 
 app.get('/ebooks/files', authRole(['user','admin','mainadmin']), async (req, res) => {
@@ -1590,7 +1648,7 @@ app.get('/ebooks/files', authRole(['user','admin','mainadmin']), async (req, res
   } catch (e) {
     console.error('ebooks root files error:', e);
     res.status(500).send('Failed to list e-books');
-
+  }
 });
 
 app.get('/ebooks/folders/:slug/files', authRole(['user','admin','mainadmin']), async (req, res) => {
@@ -1610,7 +1668,7 @@ app.get('/ebooks/folders/:slug/files', authRole(['user','admin','mainadmin']), a
   } catch (e) {
     console.error('ebooks folder files error:', e);
     res.status(500).send('Failed to list e-books in folder');
-
+  }
 });
 
 app.post('/ebooks/folders/create', authRole(['admin','mainadmin']), async (req, res) => {
@@ -1623,13 +1681,13 @@ app.post('/ebooks/folders/create', authRole(['admin','mainadmin']), async (req, 
       `INSERT INTO ebook_folders (slug, name, enabled)
        VALUES ($1,$2,true)`,
       [slug, String(name).trim()]
-
+    );
     res.status(201).json({ name: String(name).trim(), slug });
   } catch (e) {
     if (String(e.message || '').toLowerCase().includes('duplicate')) return res.status(409).json({ error: 'folder already exists' });
     console.error('ebooks create folder error:', e);
     res.status(500).send('Failed to create folder');
-
+  }
 });
 
 app.post('/ebooks/folders/:slug/rename', authRole(['admin','mainadmin']), async (req, res) => {
@@ -1653,7 +1711,7 @@ app.post('/ebooks/folders/:slug/rename', authRole(['admin','mainadmin']), async 
       await pool.query('DELETE FROM ebook_folders WHERE slug=$1', [slug]);
     } else {
       await pool.query('UPDATE ebook_folders SET name=$1 WHERE slug=$2', [desired, slug]);
-
+    }
     await pool.query('COMMIT');
 
     res.json({ ok: true, slug: newSlug, name: desired });
@@ -1661,7 +1719,7 @@ app.post('/ebooks/folders/:slug/rename', authRole(['admin','mainadmin']), async 
     try { await pool.query('ROLLBACK'); } catch {}
     console.error('ebooks rename folder error:', e);
     res.status(500).send('Failed to rename folder');
-
+  }
 });
 
 app.post('/ebooks/folders/:slug/enable', authRole(['admin','mainadmin']), async (req, res) => {
@@ -1676,7 +1734,7 @@ app.post('/ebooks/folders/:slug/enable', authRole(['admin','mainadmin']), async 
   } catch (e) {
     console.error('ebooks enable folder error:', e);
     res.status(500).send('Failed to update folder enabled');
-
+  }
 });
 
 app.delete('/ebooks/folders/:slug', authRole(['admin','mainadmin']), async (req, res) => {
@@ -1690,7 +1748,7 @@ app.delete('/ebooks/folders/:slug', authRole(['admin','mainadmin']), async (req,
       const { resources } = await cloudinary.search.expression(`folder:${prefix}`).max_results(500).execute();
       for (const r of (resources || [])) {
         await cloudinary.uploader.destroy(r.public_id, { resource_type: 'raw' });
-
+      }
     } catch (e) { console.warn('Cloudinary ebooks folder cleanup failed (non-fatal):', e.message); }
 
     const { rowCount } = await pool.query('DELETE FROM ebook_folders WHERE slug=$1', [slug]);
@@ -1699,7 +1757,7 @@ app.delete('/ebooks/folders/:slug', authRole(['admin','mainadmin']), async (req,
   } catch (e) {
     console.error('ebooks delete folder error:', e);
     res.status(500).send('Failed to delete folder');
-
+  }
 });
 
 app.post('/ebooks/upload', authRole(['admin','mainadmin']), uploadEbooksCloud.array('files', 25), async (req, res) => {
@@ -1717,9 +1775,9 @@ app.post('/ebooks/upload', authRole(['admin','mainadmin']), uploadEbooksCloud.ar
         `INSERT INTO ebook_files (folder_slug, public_id, url, filename, enabled, order_index)
          VALUES (NULL,$1,$2,$3,true,$4) RETURNING *`,
         [f.filename, f.path, filename, order++]
-
+      );
       inserted.push(rows[0]);
-
+    }
     res.status(201).json({ uploaded: inserted.map(r => ({ id:r.id, filename:r.filename, url:r.url })), count: inserted.length });
   } catch (e){ console.error('ebooks root upload error:', e); res.status(500).send('Upload failed'); }
 });
@@ -1741,9 +1799,9 @@ app.post('/ebooks/folders/:slug/upload', authRole(['admin','mainadmin']), upload
         `INSERT INTO ebook_files (folder_slug, public_id, url, filename, enabled, order_index)
          VALUES ($1,$2,$3,$4,true,$5) RETURNING *`,
         [slug, f.filename, f.path, filename, order++]
-
+      );
       inserted.push(rows[0]);
-
+    }
     res.status(201).json({ uploaded: inserted.map(r => ({ id:r.id, filename:r.filename, url:r.url })), count: inserted.length, folder: slug });
   } catch (e){ console.error('ebooks folder upload error:', e); res.status(500).send('Upload failed'); }
 });
@@ -1777,12 +1835,12 @@ app.post('/ebooks/files/rename', authRole(['admin','mainadmin']), async (req, re
     const { rows: upd } = await pool.query(
       'UPDATE ebook_files SET public_id=$1, url=$2, filename=$3 WHERE id=$4 RETURNING *',
       [newPublicId, newUrl, `${safeBase}${path.extname(row.filename)}`, row.id]
-
+    );
     res.json({ ok: true, filename: upd[0].filename, url: upd[0].url });
   } catch (e) {
     console.error('ebooks root rename error:', e);
     res.status(500).send('Failed to rename file');
-
+  }
 });
 
 app.post('/ebooks/files/enable', authRole(['admin','mainadmin']), async (req, res) => {
@@ -1809,7 +1867,7 @@ app.post('/ebooks/files/enable', authRole(['admin','mainadmin']), async (req, re
   } catch (e) {
     console.error('ebooks root enable error:', e);
     res.status(500).send('Failed to update file enabled');
-
+  }
 });
 
 app.delete('/ebooks/files', authRole(['admin','mainadmin']), async (req, res) => {
@@ -1838,7 +1896,7 @@ app.delete('/ebooks/files', authRole(['admin','mainadmin']), async (req, res) =>
   } catch (e) {
     console.error('ebooks root delete error:', e);
     res.status(500).send('Failed to delete file');
-
+  }
 });
 
 // Reorder ebook files
@@ -1847,7 +1905,7 @@ async function reorderEbookFiles(folderSlug, targetIdOrName, direction, newIndex
   const vals = folderSlug ? [folderSlug] : [];
   const { rows } = await pool.query(
     `SELECT id, filename FROM ebook_files WHERE ${cond} ORDER BY order_index ASC, id ASC`, vals
-
+  );
   let list = rows.map(r => ({ id: r.id, name: r.filename }));
   let idx = list.findIndex(x => String(x.id) === String(targetIdOrName) || String(x.name) === String(targetIdOrName));
   if (idx === -1) return;
@@ -1858,10 +1916,11 @@ async function reorderEbookFiles(folderSlug, targetIdOrName, direction, newIndex
     [list[idx-1], list[idx]] = [list[idx], list[idx-1]];
   } else if (direction === 'down' && idx >= 0 && idx < list.length - 1) {
     [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
-
+  }
   for (let i=0;i<list.length;i++) {
     await pool.query('UPDATE ebook_files SET order_index=$1 WHERE id=$2', [i, list[i].id]);
-
+  }
+}
 
 app.post('/ebooks/files/reorder', authRole(['admin','mainadmin']), async (req, res) => {
   try {
@@ -1878,7 +1937,7 @@ app.post('/ebooks/files/reorder', authRole(['admin','mainadmin']), async (req, r
   } catch (e) {
     console.error('ebooks reorder error:', e);
     res.status(500).send('Failed to reorder');
-
+  }
 });
 
 /* ===================== Analytics + Totals (DB-based) ===================== */
@@ -1904,12 +1963,12 @@ app.get('/analytics/summary', authRole(['user','admin','mainadmin']), async (req
       const k = (r.category || '').trim();
       if (!map.has(k)) map.set(k, { category: k, donationTotal: 0, expenseTotal: 0 });
       map.get(k).donationTotal += Number(r.total || 0);
-
+    }
     for (const r of esum) {
       const k = (r.category || '').trim();
       if (!map.has(k)) map.set(k, { category: k, donationTotal: 0, expenseTotal: 0 });
       map.get(k).expenseTotal += Number(r.total || 0);
-
+    }
     const out = Array.from(map.values()).map(x => ({ ...x, balance: (x.donationTotal - x.expenseTotal) }));
     res.json(out);
   } catch (e){ console.error('analytics summary error:', e); res.status(500).send('Analytics summary failed'); }
@@ -1931,7 +1990,7 @@ app.get('/debug/donations', async (req, res) => {
     });
   } catch (e) {
     res.status(500).json({ error: 'debug failed' });
-
+  }
 });
 app.get('/debug/expenses', async (req, res) => {
   try {
@@ -1940,7 +1999,7 @@ app.get('/debug/expenses', async (req, res) => {
     res.json({ count: rows.length, sample: rows.map(rowToExpense) });
   } catch (e) {
     res.status(500).json({ error: 'debug failed' });
-
+  }
 });
 
 // Whoami
@@ -1957,12 +2016,13 @@ try {
   app.use("/analytics/admin", authRole(["admin","mainadmin"]), analyticsAdminDB);
 } catch (e) {
   console.warn('analyticsAdminDB route not mounted:', e.message);
-
+}
 try {
   const analyticsPublic = require("./routes/analyticsPublic");
   app.use("/analytics/public", authOptional, analyticsPublic);
 } catch (e) {
   console.warn('analyticsPublic route not mounted:', e.message);
+}
 
 try {
   const aiRoutes = require("./routes/ai");
@@ -1970,7 +2030,7 @@ try {
   app.use("/ai", authRole(["admin","mainadmin"]), aiRoutes);
 } catch (e) {
   console.warn('ai routes not mounted:', e.message);
-
+}
 const PORT = parseInt(process.env.PORT || '10000', 10);
 const HOST = '0.0.0.0';
 
@@ -1983,8 +2043,8 @@ async function migrateCategoriesDefaults() {
     console.log('Categories defaults fixed');
   } catch (e) {
     console.warn('Categories default migration skipped:', e.message);
-
-
+  }
+}
 async function fixCategoryDefaults() {
   try {
     await ensureCategoriesTable();
@@ -1994,8 +2054,8 @@ async function fixCategoryDefaults() {
     console.log('Categories defaults fixed');
   } catch (e) {
     console.warn('Categories default migration skipped:', e.message);
-
-
+  }
+}
 async function start() {
   try {
     await ensureUsersTable();
@@ -2014,8 +2074,8 @@ async function start() {
   } catch (e) {
     console.error('Startup failed:', e);
     process.exit(1);
-
-
+  }
+}
 start();app.get('/debug/version', (req, res) => {
   try {
     const fs = require('fs'); const crypto = require('crypto');
@@ -2044,7 +2104,7 @@ app.post('/admin/create-user', authRole(['admin','mainadmin']), async (req, res)
     const users = await getUsers();
     if (users.find(u => String(u.username).toLowerCase() === usernameIn.toLowerCase())) {
       return res.status(409).json({ error: 'username already exists' });
-
+    }
     const next = users.slice();
     next.push({ username: usernameIn, password: passwordIn, role: roleIn, banned: false });
     await saveUsers(next);
@@ -2055,15 +2115,10 @@ app.post('/admin/create-user', authRole(['admin','mainadmin']), async (req, res)
   } catch (e) {
     console.error('create user (alias) error:', e);
     res.status(500).json({ error: 'Create user failed' });
-
+  }
 });
 /* ===================== Categories: enable/rename/delete ===================== */
-
-function rowToCategory(r){
-  const en = (r.enabled === true || r.enabled === "true" || r.enabled === 1 || r.enabled === "1");
-  return { id: r.id, name: r.name, enabled: en, isEnabled: en, createdAt: r.created_at || r.createdAt };
-
-; }
+function rowToCategory(r){ return { id:r.id, name:r.name, enabled:r.enabled, createdAt:r.created_at }; }
 
 // Enable/Disable by param id
 app.post('/api/categories/:id/enable', authRole(['admin','mainadmin']), async (req, res) => {
@@ -2072,26 +2127,27 @@ app.post('/api/categories/:id/enable', authRole(['admin','mainadmin']), async (r
     const id = req.params.id;
 
     // Accept enabled from body or query; if missing, TOGGLE
-    const enabledRaw = (req.body?.enabled ?? req.query?.enabled ?? req.body?.isEnabled ?? req.query?.isEnabled);
+    const enabledRaw = (req.body?.enabled ?? req.query?.enabled);
     if (enabledRaw === undefined) {
       const { rows } = await pool.query(
         'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at',
         [id]
-
+      );
       if (!rows.length) return res.status(404).json({ error: 'category not found' });
       return res.json({ ok: true, toggled: true, category: rowToCategory(rows[0]) });
+    }
 
     const enabled = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
     const { rows } = await pool.query(
       'UPDATE categories SET enabled=$1 WHERE id=$2 RETURNING *',
       [enabled, id]
-
+    );
     if (!rows.length) return res.status(404).json({ error: 'category not found' });
     res.json({ ok: true, category: rowToCategory(rows[0]) });
   } catch (e) {
     console.error('categories enable error:', e);
     res.status(500).send('Failed to update category');
-
+  }
 });
 
 // Rename by param id
@@ -2104,13 +2160,13 @@ app.post('/api/categories/:id/rename', authRole(['admin','mainadmin']), async (r
     if (!desired) return res.status(400).json({ error: 'name (or newName) required' });
     const { rows } = await pool.query(
       'UPDATE categories SET name=$1 WHERE id=$2 RETURNING id,name,enabled,created_at', [desired, id]
-
+    );
     if (!rows.length) return res.status(404).json({ error: 'category not found' });
     res.json({ ok:true, category: rowToCategory(rows[0]) });
   } catch(e){
     if ((e.code||'').startsWith('23')) return res.status(409).json({ error: 'category already exists' });
     console.error('categories rename error:', e); res.status(500).send('Failed to rename category');
-
+  }
 });
 
 // Delete by param id
@@ -2154,7 +2210,7 @@ app.post('/api/admin/categories/rename', authRole(['admin','mainadmin']), async 
   } catch(e){
     if ((e.code||'').startsWith('23')) return res.status(409).json({ error: 'category already exists' });
     console.error('categories alias rename error:', e); res.status(500).send('Failed to rename category');
-
+  }
 });
 
 app.post('/api/admin/categories/delete', authRole(['admin','mainadmin']), async (req, res) => {
@@ -2170,11 +2226,63 @@ app.post('/api/admin/categories/delete', authRole(['admin','mainadmin']), async 
 });
 /* ===================== End: Categories mgmt ===================== */
 /* ===== Categories mgmt: enable/rename/delete with broad aliases ===== */
+function rowToCategory(r){ return { id:r.id, name:r.name, enabled:r.enabled, createdAt:r.created_at }; }
 
-function rowToCategory(r){
-  const en = (r.enabled === true || r.enabled === "true" || r.enabled === 1 || r.enabled === "1");
-  return { id: r.id, name: r.name, enabled: en, isEnabled: en, createdAt: r.created_at || r.createdAt };
+async function catEnableHandler(req, res) {
+  try {
+    await ensureCategoriesTable();
 
+    const id = (req.params?.id ?? req.body?.id ?? req.query?.id);
+    if (!id) return res.status(400).json({ error: 'id required' });
+    const enabledRaw = req.body?.enabled ?? req.query?.enabled ?? true;
+    const enabled = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
+    const { rows } = await pool.query('UPDATE categories SET enabled=$1 WHERE id=$2 RETURNING id,name,enabled,created_at', [enabled, id]);
+    if (!rows.length) return res.status(404).json({ error: 'category not found' });
+    res.json({ ok:true, category: rowToCategory(rows[0]) });
+  } catch(e){ console.error('categories enable error:', e); res.status(500).send('Failed to update category'); }
+}
+
+async function catRenameHandler(req, res) {
+  try {
+    await ensureCategoriesTable();
+
+    const id = (req.params?.id ?? req.body?.id ?? req.query?.id);
+    const desired = String((req.body?.name || req.body?.newName || req.query?.name || req.query?.newName || '')).trim();
+    if (!id) return res.status(400).json({ error: 'id required' });
+    if (!desired) return res.status(400).json({ error: 'name (or newName) required' });
+    const { rows } = await pool.query('UPDATE categories SET name=$1 WHERE id=$2 RETURNING id,name,enabled,created_at', [desired, id]);
+    if (!rows.length) return res.status(404).json({ error: 'category not found' });
+    res.json({ ok:true, category: rowToCategory(rows[0]) });
+  } catch(e){
+    if ((e.code||'').startsWith('23')) return res.status(409).json({ error: 'category already exists' });
+    console.error('categories rename error:', e); res.status(500).send('Failed to rename category');
+  }
+}
+
+async function catDeleteHandler(req, res) {
+  try {
+    await ensureCategoriesTable();
+
+    const id = (req.params?.id ?? req.body?.id ?? req.query?.id);
+    if (!id) return res.status(400).json({ error: 'id required' });
+    const { rows } = await pool.query('DELETE FROM categories WHERE id=$1 RETURNING id,name,enabled,created_at', [id]);
+    if (!rows.length) return res.status(404).json({ error: 'category not found' });
+    res.json({ ok:true, category: rowToCategory(rows[0]) });
+  } catch(e){ console.error('categories delete error:', e); res.status(500).send('Failed to delete category'); }
+}
+
+// Aliases: /api/admin, /api, /admin (body/query id)
+['/api/admin/categories/enable','/api/categories/enable','/admin/categories/enable'].forEach(p =>
+  app.post(p, authRole(['admin','mainadmin']), catEnableHandler)
+);
+['/api/admin/categories/rename','/api/categories/rename','/admin/categories/rename'].forEach(p =>
+  app.post(p, authRole(['admin','mainadmin']), catRenameHandler)
+);
+['/api/admin/categories/delete','/api/categories/delete','/admin/categories/delete'].forEach(p =>
+  app.post(p, authRole(['admin','mainadmin']), catDeleteHandler)
+);
+
+// REST-style params too
 app.post('/api/categories/:id/enable', authRole(['admin','mainadmin']), catEnableHandler);
 app.post('/api/categories/:id/rename', authRole(['admin','mainadmin']), catRenameHandler);
 app.delete('/api/categories/:id', authRole(['admin','mainadmin']), catDeleteHandler);
@@ -2190,7 +2298,7 @@ async function updateCategoryByIdHandler(req, res) {
     if (!id) return res.status(400).json({ error: 'id required' });
 
     const nameIn = (req.body?.name ?? req.body?.newName ?? req.query?.name ?? req.query?.newName);
-    const enabledRaw = (req.body?.enabled ?? req.query?.enabled ?? req.body?.isEnabled ?? req.query?.isEnabled);
+    const enabledRaw = (req.body?.enabled ?? req.query?.enabled);
 
     const fields = []; const vals = []; let idx = 1;
 
@@ -2198,10 +2306,11 @@ async function updateCategoryByIdHandler(req, res) {
       const nm = String(nameIn).trim();
       if (!nm) return res.status(400).json({ error: 'name (or newName) required' });
       fields.push(`name = $${idx++}`); vals.push(nm);
-
+    }
     if (enabledRaw !== undefined) {
       const en = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
       fields.push(`enabled = $${idx++}`); vals.push(en);
+    }
 
     if (!fields.length) return res.status(400).json({ error: 'no fields to update' });
 
@@ -2210,12 +2319,13 @@ async function updateCategoryByIdHandler(req, res) {
     const { rows } = await pool.query(sql, vals);
     if (!rows.length) return res.status(404).json({ error: 'category not found' });
     const r = rows[0];
-    return res.json({ ok: true, category: rowToCategory(r) });
+    return res.json({ ok: true, category: { id: r.id, name: r.name, enabled: r.enabled, createdAt: r.created_at } });
   } catch (e) {
     if ((e.code || '').startsWith('23')) return res.status(409).json({ error: 'category already exists' });
     console.error('categories PUT/PATCH error:', e);
     res.status(500).send('Category update failed');
-
+  }
+}
 
 /* ===== Pre-route: admin PUT toggle when no body/params provided ===== */
 
@@ -2225,11 +2335,12 @@ async function catAdminPutHandler(req, res) {
                  || (typeof req.body?.newName === 'string' && req.body.newName.trim())
                  || (typeof req.query?.name === 'string' && req.query.name.trim())
                  || (typeof req.query?.newName === 'string' && req.query.newName.trim());
-    const hasEnabled = (req.body?.enabled !== undefined) || (req.query?.enabled !== undefined) || (req.body?.isEnabled !== undefined) || (req.query?.isEnabled !== undefined);
+    const hasEnabled = (req.body?.enabled !== undefined) || (req.query?.enabled !== undefined);
 
     // If explicit fields provided, delegate to the normal updater
     if (hasName || hasEnabled) {
       return updateCategoryByIdHandler(req, res);
+    }
 
     // No fields -> TOGGLE
     await ensureCategoriesTable();
@@ -2237,21 +2348,21 @@ async function catAdminPutHandler(req, res) {
     const { rows } = await pool.query(
       'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at',
       [id]
-
+    );
     if (!rows.length) return res.status(404).json({ error: 'category not found' });
     return res.json({ ok: true, toggled: true, category: rowToCategory(rows[0]) });
   } catch (e) {
     console.error('catAdminPutHandler error:', e);
     return res.status(500).send('Category update failed');
-
-
+  }
+}
 app.put('/api/admin/categories/:id', authRole(['admin','mainadmin']), async function adminPreToggleNoBody(req, res, next) {
   try {
     const hasName = (typeof req.body?.name === 'string' && req.body.name.trim())
                  || (typeof req.body?.newName === 'string' && req.body.newName.trim())
                  || (typeof req.query?.name === 'string' && req.query.name.trim())
                  || (typeof req.query?.newName === 'string' && req.query.newName.trim());
-    const hasEnabled = (req.body?.enabled !== undefined) || (req.query?.enabled !== undefined) || (req.body?.isEnabled !== undefined) || (req.query?.isEnabled !== undefined);
+    const hasEnabled = (req.body?.enabled !== undefined) || (req.query?.enabled !== undefined);
 
     if (hasName || hasEnabled) return next('route'); // let the next route handle explicit updates
 
@@ -2260,13 +2371,13 @@ app.put('/api/admin/categories/:id', authRole(['admin','mainadmin']), async func
     const { rows } = await pool.query(
       'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at',
       [id]
-
+    );
     if (!rows.length) return res.status(404).json({ error: 'category not found' });
     return res.json({ ok: true, toggled: true, category: rowToCategory(rows[0]) });
   } catch (e) {
     console.error('admin pre-toggle error:', e);
     return res.status(500).send('Category toggle failed');
-
+  }
 });
 app.put('/api/admin/categories/:id', authRole(['admin','mainadmin']), updateCategoryByIdHandler);
 app.patch('/api/admin/categories/:id', authRole(['admin','mainadmin']), updateCategoryByIdHandler);
@@ -2280,11 +2391,11 @@ app.get('/api/categories/enabled', authRole(['user','admin','mainadmin']), async
     await ensureCategoriesTable();
 
     const { rows } = await pool.query('SELECT id, name, enabled, created_at FROM categories WHERE enabled = true ORDER BY lower(name) ASC');
-    res.json(rows.map(rowToCategory));
+    res.json(rows);
   } catch (e) {
     console.error('categories enabled-list error:', e);
     res.status(500).send('Failed to list categories');
-
+  }
 });
 
 // Public (no token) - always enabled only
@@ -2293,11 +2404,11 @@ app.get('/public/categories', authOptional, async (req, res) => {
     await ensureCategoriesTable();
 
     const { rows } = await pool.query('SELECT id, name FROM categories WHERE enabled = true ORDER BY lower(name) ASC');
-    res.json(rows.map(r => ({ id: r.id, name: r.name, enabled: true, isEnabled: true })));
+    res.json(rows);
   } catch (e) {
     console.error('public categories list error:', e);
     res.status(500).send('Failed to list categories');
-
+  }
 });
 app.post("/admin/categories/create", authRole(["admin","mainadmin"]), createCategoryHandler);
 
@@ -2312,14 +2423,15 @@ async function catToggleHandler(req, res) {
     const { rows } = await pool.query(
       'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id= RETURNING id,name,enabled,created_at',
       [id]
-
+    );
     if (!rows.length) return res.status(404).json({ error: 'category not found' });
     const r = rows[0];
-    return res.json({ ok: true, toggled: true, category: rowToCategory(r) });
+    return res.json({ ok: true, toggled: true, category: { id: r.id, name: r.name, enabled: r.enabled, createdAt: r.created_at } });
   } catch (e) {
     console.error('categories toggle error:', e);
     return res.status(500).send('Toggle failed');
-
+  }
+}
 
 // Map to multiple paths (admin-only)
 app.post('/api/admin/categories/:id/toggle', authRole(['admin','mainadmin']), catToggleHandler);
