@@ -688,18 +688,7 @@ app.put('/api/expenses/:id', authRole(['admin','mainadmin']), async (req, res) =
     if (body.date) { fields.push(`date = $${idx++}`); vals.push(new Date(body.date)); }
     if (body.enabled !== undefined) { fields.push(`enabled = $${idx++}`); vals.push(!(body.enabled === false || body.enabled === 'false')); }
 
-    if (!fields.length) {
-    try {
-      const { rows: cur } = await pool.query('SELECT id,name,enabled,created_at FROM categories WHERE id=$1', [id]);
-      if (!cur.length) return res.status(404).json({ error: 'category not found' });
-      const { rows } = await pool.query('UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at', [id]);
-      const r = rows[0];
-      return res.json({ ok: true, toggled: true, category: { id: r.id, name: r.name, enabled: r.enabled, createdAt: r.created_at } });
-    } catch (e) {
-      console.error('categories PUT/PATCH toggle error:', e);
-      return res.status(500).send('Category toggle failed');
-    }
-  }
+    if (!fields.length) return res.status(400).json({ error: 'no fields to update' });
 
     fields.push(`updated_at = now()`);
     vals.push(id);
