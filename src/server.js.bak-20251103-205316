@@ -38,13 +38,13 @@ app.use('/api/categories', authRole(['user','admin','mainadmin']), async functio
     const out = rows.map(r => {
       const en = (r.enabled === true || r.enabled === 'true' || r.enabled === 1 || r.enabled === '1');
       return { id: r.id, name: r.name, enabled: en, isEnabled: en, createdAt: r.created_at };
-
+    });
     return res.json(out);
   } catch (e) {
     console.error('categories list mw error:', e);
     return res.status(500).send('Failed to list categories');
 
-
+});
 
 /* ===== MW: Admin PUT no-body toggle for /api/admin/categories/:id ===== */
 app.use(async function adminCatsPutToggleMw(req, res, next) {
@@ -68,7 +68,7 @@ app.use(async function adminCatsPutToggleMw(req, res, next) {
     const { rows } = await pool.query(
       'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at',
       [id]
-
+    );
     if (!rows.length) return res.status(404).json({ error: 'category not found' });
 
     const r = rows[0];
@@ -77,14 +77,14 @@ app.use(async function adminCatsPutToggleMw(req, res, next) {
     console.error('admin PUT toggle mw error:', e);
     return res.status(500).send('Category toggle failed');
 
-
+});
 
 
 // Request log
 app.use((req, res, next) => {
   console.log(new Date().toISOString(), req.method, req.originalUrl);
   next();
-
+});
 
 // Dev helper: allow ?token=...
 app.use((req, res, next) => {
@@ -92,7 +92,7 @@ app.use((req, res, next) => {
     req.headers.authorization = `Bearer ${req.query.token}`;
 
   next();
-
+});
 
 // Static (compat; Cloudinary is primary now)
 const uploadsDir = path.join(process.cwd(), 'uploads');
@@ -104,18 +104,18 @@ const useSSL = !!(
   (process.env.DATABASE_URL && /sslmode=require|neon|render|amazonaws|\.neon\.tech/i.test(process.env.DATABASE_URL))
   || process.env.PGSSL === '1'
   || process.env.PGSSLMODE === 'require'
-
+);
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: useSSL ? { rejectUnauthorized: false } : false,
-
+});
 
 /* ===================== Cloudinary ===================== */
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key:    process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
-
+});
 
 /* ===================== Auth helpers ===================== */
 const SECRET_KEY = process.env.JWT_SECRET || 'your_secret_key_here';
