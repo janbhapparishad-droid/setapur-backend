@@ -4,10 +4,14 @@
       await ensureCategoriesTable();
       const nm = (req.body?.name ?? '').toString().trim();
       if (!nm) return res.status(400).json({ error: 'name required' });
+
+      // Case-insensitive duplicate check
       const { rows: dup } = await pool.query(
         'SELECT 1 FROM categories WHERE lower(name) = lower() LIMIT 1', [nm]
       );
       if (dup.length) return res.status(409).json({ error: 'category already exists' });
+
+      // Minimal insert; enabled uses DB default TRUE
       const { rows } = await pool.query(
         'INSERT INTO categories(name) VALUES () RETURNING id, name, enabled, created_at',
         [nm]
@@ -18,12 +22,13 @@
       return res.status(500).json({ error: 'Create failed', code: e.code || null, detail: e.message || String(e) });
     }
   }
-  // mount on three paths so FE can use a stable one now
+
+  // Mount create on multiple paths to avoid FE mismatch
   ['/api/admin/categories', '/api/admin/categories/create', '/api/admin/categories/create-safe'].forEach((p) => {
     app.post(p, authRole(['admin','mainadmin']), createCategory);
   });
 
-  // public enabled-only list
+  // Public enabled-only list
   app.get('/public/categories', authOptional, async (req, res) => {
     try {
       await ensureCategoriesTable();
@@ -37,4 +42,3 @@
     }
   });
 };
-
