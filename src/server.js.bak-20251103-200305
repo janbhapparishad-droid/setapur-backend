@@ -16,39 +16,6 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
-/* ===== MW: Admin PUT no-body toggle for /api/admin/categories/:id ===== */
-app.use(async function adminCatsPutToggleMw(req, res, next) {
-  try {
-    if (req.method !== 'PUT') return next();
-    // Only match: /api/admin/categories/:id (exact, no suffix path)
-    const m = req.path && req.path.match(/^\/api\/admin\/categories\/(\d+)$/i);
-    if (!m) return next();
-
-    const hasName = (typeof req.body?.name === 'string' && req.body.name.trim())
-                 || (typeof req.body?.newName === 'string' && req.body.newName.trim())
-                 || (typeof req.query?.name === 'string' && req.query.name.trim())
-                 || (typeof req.query?.newName === 'string' && req.query.newName.trim());
-    const hasEnabled = (req.body?.enabled !== undefined) || (req.query?.enabled !== undefined);
-
-    // If any field provided, let normal handler proceed
-    if (hasName || hasEnabled) return next();
-
-    await ensureCategoriesTable();
-    const id = m[1];
-    const { rows } = await pool.query(
-      'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at',
-      [id]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'category not found' });
-
-    const r = rows[0];
-    return res.json({ ok: true, toggled: true, category: { id: r.id, name: r.name, enabled: r.enabled, createdAt: r.created_at } });
-  } catch (e) {
-    console.error('admin PUT toggle mw error:', e);
-    return res.status(500).send('Category toggle failed');
-  }
-});
-
 
 // Request log
 app.use((req, res, next) => {
