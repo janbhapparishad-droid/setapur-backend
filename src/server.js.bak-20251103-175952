@@ -1,4 +1,4 @@
-﻿/* --- server.js (Cleaned & fixed) --- */
+/* --- server.js (Cleaned & fixed) --- */
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -523,7 +523,7 @@ const createCategoryHandler = async (req, res) => {
 
     // Use DB default for enabled (DEFAULT TRUE), and handle duplicates cleanly
     const { rows } = await pool.query(
-      'INSERT INTO categories(name) VALUES ($1) ON CONFLICT (name) DO NOTHING RETURNING id, name, enabled, created_at',
+      'INSERT INTO categories(name) VALUES () ON CONFLICT (name) DO NOTHING RETURNING id, name, enabled, created_at',
       [nm]
     );
     if (!rows.length) return res.status(409).json({ error: 'category already exists' });
