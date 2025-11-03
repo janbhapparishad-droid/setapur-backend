@@ -16,39 +16,6 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
-/* ===== MW: Admin PUT no-body toggle for /api/admin/categories/:id ===== */
-app.use(async function adminCatsPutToggleMw(req, res, next) {
-  try {
-    if (req.method !== 'PUT') return next();
-    // Only match: /api/admin/categories/:id (exact, no suffix path)
-    const m = req.path && req.path.match(/^\/api\/admin\/categories\/(\d+)$/i);
-    if (!m) return next();
-
-    const hasName = (typeof req.body?.name === 'string' && req.body.name.trim())
-                 || (typeof req.body?.newName === 'string' && req.body.newName.trim())
-                 || (typeof req.query?.name === 'string' && req.query.name.trim())
-                 || (typeof req.query?.newName === 'string' && req.query.newName.trim());
-    const hasEnabled = (req.body?.enabled !== undefined) || (req.query?.enabled !== undefined) || (req.body?.isEnabled !== undefined) || (req.query?.isEnabled !== undefined);
-
-    // If any field provided, let normal handler proceed
-    if (hasName || hasEnabled) return next();
-
-    await ensureCategoriesTable();
-    const id = m[1];
-    const { rows } = await pool.query(
-      'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at',
-      [id]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'category not found' });
-
-    const r = rows[0];
-    return res.json({ ok: true, toggled: true, category: rowToCategory(r) });
-  } catch (e) {
-    console.error('admin PUT toggle mw error:', e);
-    return res.status(500).send('Category toggle failed');
-  }
-});
-
 
 // Request log
 app.use((req, res, next) => {
@@ -543,7 +510,7 @@ const listCategoriesHandler = async (req, res) => {
     if (!isAdmin && !includeDisabled) sql += ' WHERE enabled = true';
     sql += ' ORDER BY lower(name) ASC';
     const { rows } = await pool.query(sql);
-    res.json(rows.map(rowToCategory));
+    res.json(rows);
   } catch (e) {
     console.error('categories list error:', e);
     res.status(500).send('Failed to list categories');
@@ -562,7 +529,7 @@ const createCategoryHandler = async (req, res) => {
       [nm]
     );
     if (!rows.length) return res.status(409).json({ error: 'category already exists' });
-    return res.status(201).json(rowToCategory(rows[0]));
+    return res.status(201).json(rows[0]);
   } catch (e) {
     console.error('categories create error:', e);
     return res.status(500).json({ error: 'Create failed', code: e.code || null, detail: e.message || String(e) });
@@ -727,7 +694,7 @@ app.put('/api/expenses/:id', authRole(['admin','mainadmin']), async (req, res) =
       if (!cur.length) return res.status(404).json({ error: 'category not found' });
       const { rows } = await pool.query('UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at', [id]);
       const r = rows[0];
-      return res.json({ ok: true, toggled: true, category: rowToCategory(r) });
+      return res.json({ ok: true, toggled: true, category: { id: r.id, name: r.name, enabled: r.enabled, createdAt: r.created_at } });
     } catch (e) {
       console.error('categories PUT/PATCH toggle error:', e);
       return res.status(500).send('Category toggle failed');
@@ -2118,12 +2085,7 @@ app.post('/admin/create-user', authRole(['admin','mainadmin']), async (req, res)
   }
 });
 /* ===================== Categories: enable/rename/delete ===================== */
-
-function rowToCategory(r){
-  const en = (r.enabled === true || r.enabled === "true" || r.enabled === 1 || r.enabled === "1");
-  return { id: r.id, name: r.name, enabled: en, isEnabled: en, createdAt: r.created_at || r.createdAt };
-}
-; }
+function rowToCategory(r){ return { id:r.id, name:r.name, enabled:r.enabled, createdAt:r.created_at }; }
 
 // Enable/Disable by param id
 app.post('/api/categories/:id/enable', authRole(['admin','mainadmin']), async (req, res) => {
@@ -2132,7 +2094,7 @@ app.post('/api/categories/:id/enable', authRole(['admin','mainadmin']), async (r
     const id = req.params.id;
 
     // Accept enabled from body or query; if missing, TOGGLE
-    const enabledRaw = (req.body?.enabled ?? req.query?.enabled ?? req.body?.isEnabled ?? req.query?.isEnabled);
+    const enabledRaw = (req.body?.enabled ?? req.query?.enabled);
     if (enabledRaw === undefined) {
       const { rows } = await pool.query(
         'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at',
@@ -2231,12 +2193,7 @@ app.post('/api/admin/categories/delete', authRole(['admin','mainadmin']), async 
 });
 /* ===================== End: Categories mgmt ===================== */
 /* ===== Categories mgmt: enable/rename/delete with broad aliases ===== */
-
-function rowToCategory(r){
-  const en = (r.enabled === true || r.enabled === "true" || r.enabled === 1 || r.enabled === "1");
-  return { id: r.id, name: r.name, enabled: en, isEnabled: en, createdAt: r.created_at || r.createdAt };
-}
-; }
+function rowToCategory(r){ return { id:r.id, name:r.name, enabled:r.enabled, createdAt:r.created_at }; }
 
 async function catEnableHandler(req, res) {
   try {
@@ -2244,7 +2201,7 @@ async function catEnableHandler(req, res) {
 
     const id = (req.params?.id ?? req.body?.id ?? req.query?.id);
     if (!id) return res.status(400).json({ error: 'id required' });
-    const enabledRaw = (req.body?.enabled ?? req.query?.enabled ?? req.body?.isEnabled ?? req.query?.isEnabled ?? true);
+    const enabledRaw = req.body?.enabled ?? req.query?.enabled ?? true;
     const enabled = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
     const { rows } = await pool.query('UPDATE categories SET enabled=$1 WHERE id=$2 RETURNING id,name,enabled,created_at', [enabled, id]);
     if (!rows.length) return res.status(404).json({ error: 'category not found' });
@@ -2308,7 +2265,7 @@ async function updateCategoryByIdHandler(req, res) {
     if (!id) return res.status(400).json({ error: 'id required' });
 
     const nameIn = (req.body?.name ?? req.body?.newName ?? req.query?.name ?? req.query?.newName);
-    const enabledRaw = (req.body?.enabled ?? req.query?.enabled ?? req.body?.isEnabled ?? req.query?.isEnabled);
+    const enabledRaw = (req.body?.enabled ?? req.query?.enabled);
 
     const fields = []; const vals = []; let idx = 1;
 
@@ -2329,66 +2286,13 @@ async function updateCategoryByIdHandler(req, res) {
     const { rows } = await pool.query(sql, vals);
     if (!rows.length) return res.status(404).json({ error: 'category not found' });
     const r = rows[0];
-    return res.json({ ok: true, category: rowToCategory(r) });
+    return res.json({ ok: true, category: { id: r.id, name: r.name, enabled: r.enabled, createdAt: r.created_at } });
   } catch (e) {
     if ((e.code || '').startsWith('23')) return res.status(409).json({ error: 'category already exists' });
     console.error('categories PUT/PATCH error:', e);
     res.status(500).send('Category update failed');
   }
 }
-
-/* ===== Pre-route: admin PUT toggle when no body/params provided ===== */
-
-async function catAdminPutHandler(req, res) {
-  try {
-    const hasName = (typeof req.body?.name === 'string' && req.body.name.trim())
-                 || (typeof req.body?.newName === 'string' && req.body.newName.trim())
-                 || (typeof req.query?.name === 'string' && req.query.name.trim())
-                 || (typeof req.query?.newName === 'string' && req.query.newName.trim());
-    const hasEnabled = (req.body?.enabled !== undefined) || (req.query?.enabled !== undefined) || (req.body?.isEnabled !== undefined) || (req.query?.isEnabled !== undefined);
-
-    // If explicit fields provided, delegate to the normal updater
-    if (hasName || hasEnabled) {
-      return updateCategoryByIdHandler(req, res);
-    }
-
-    // No fields -> TOGGLE
-    await ensureCategoriesTable();
-    const id = req.params.id;
-    const { rows } = await pool.query(
-      'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at',
-      [id]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'category not found' });
-    return res.json({ ok: true, toggled: true, category: rowToCategory(rows[0]) });
-  } catch (e) {
-    console.error('catAdminPutHandler error:', e);
-    return res.status(500).send('Category update failed');
-  }
-}
-app.put('/api/admin/categories/:id', authRole(['admin','mainadmin']), async function adminPreToggleNoBody(req, res, next) {
-  try {
-    const hasName = (typeof req.body?.name === 'string' && req.body.name.trim())
-                 || (typeof req.body?.newName === 'string' && req.body.newName.trim())
-                 || (typeof req.query?.name === 'string' && req.query.name.trim())
-                 || (typeof req.query?.newName === 'string' && req.query.newName.trim());
-    const hasEnabled = (req.body?.enabled !== undefined) || (req.query?.enabled !== undefined) || (req.body?.isEnabled !== undefined) || (req.query?.isEnabled !== undefined);
-
-    if (hasName || hasEnabled) return next('route'); // let the next route handle explicit updates
-
-    await ensureCategoriesTable();
-    const id = req.params.id;
-    const { rows } = await pool.query(
-      'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at',
-      [id]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'category not found' });
-    return res.json({ ok: true, toggled: true, category: rowToCategory(rows[0]) });
-  } catch (e) {
-    console.error('admin pre-toggle error:', e);
-    return res.status(500).send('Category toggle failed');
-  }
-});
 app.put('/api/admin/categories/:id', authRole(['admin','mainadmin']), updateCategoryByIdHandler);
 app.patch('/api/admin/categories/:id', authRole(['admin','mainadmin']), updateCategoryByIdHandler);
 app.put('/admin/categories/:id', authRole(['admin','mainadmin']), updateCategoryByIdHandler);
@@ -2401,7 +2305,7 @@ app.get('/api/categories/enabled', authRole(['user','admin','mainadmin']), async
     await ensureCategoriesTable();
 
     const { rows } = await pool.query('SELECT id, name, enabled, created_at FROM categories WHERE enabled = true ORDER BY lower(name) ASC');
-    res.json(rows.map(rowToCategory));
+    res.json(rows);
   } catch (e) {
     console.error('categories enabled-list error:', e);
     res.status(500).send('Failed to list categories');
@@ -2414,7 +2318,7 @@ app.get('/public/categories', authOptional, async (req, res) => {
     await ensureCategoriesTable();
 
     const { rows } = await pool.query('SELECT id, name FROM categories WHERE enabled = true ORDER BY lower(name) ASC');
-    res.json(rows.map(r => ({ id: r.id, name: r.name, enabled: true, isEnabled: true })));
+    res.json(rows);
   } catch (e) {
     console.error('public categories list error:', e);
     res.status(500).send('Failed to list categories');
@@ -2436,7 +2340,7 @@ async function catToggleHandler(req, res) {
     );
     if (!rows.length) return res.status(404).json({ error: 'category not found' });
     const r = rows[0];
-    return res.json({ ok: true, toggled: true, category: rowToCategory(r) });
+    return res.json({ ok: true, toggled: true, category: { id: r.id, name: r.name, enabled: r.enabled, createdAt: r.created_at } });
   } catch (e) {
     console.error('categories toggle error:', e);
     return res.status(500).send('Toggle failed');
