@@ -502,7 +502,6 @@ async function ensureCategoriesTable() {
 const listCategoriesHandler = async (req, res) => {
   try {
     await ensureCategoriesTable();
-    await migrateCategoriesDefaults();
     const role = req.user?.role || 'user';
     const isAdmin = role === 'admin' || role === 'mainadmin';
     const includeDisabled = ['1','true'].includes(String(req.query.includeDisabled || '').toLowerCase());
@@ -519,7 +518,6 @@ const listCategoriesHandler = async (req, res) => {
 const createCategoryHandler = async (req, res) => {
   try {
     await ensureCategoriesTable();
-    await migrateCategoriesDefaults();
     const nm = (req.body?.name ?? '').toString().trim();
     if (!nm) return res.status(400).json({ error: 'name required' });
 
@@ -1990,17 +1988,6 @@ try {
 const PORT = parseInt(process.env.PORT || '10000', 10);
 const HOST = '0.0.0.0';
 
-async function migrateCategoriesDefaults() {
-  try {
-    await ensureCategoriesTable();
-    await migrateCategoriesDefaults();
-    await pool.query('ALTER TABLE categories ALTER COLUMN enabled SET DEFAULT TRUE;');
-    await pool.query('UPDATE categories SET enabled = TRUE WHERE enabled IS NULL;');
-    console.log('Categories defaults fixed');
-  } catch (e) {
-    console.warn('Categories default migration skipped:', e.message);
-  }
-}
 async function start() {
   try {
     await ensureUsersTable();
@@ -2009,7 +1996,6 @@ async function start() {
     await ensureGalleryTables();
     await ensureEbooksTables();
     await ensureCategoriesTable();
-    await migrateCategoriesDefaults();
     await seedAdmin();
     app.listen(PORT, HOST, () => {
       console.log(`Server listening on http://${HOST}:${PORT}`);
@@ -2067,7 +2053,6 @@ function rowToCategory(r){ return { id:r.id, name:r.name, enabled:r.enabled, cre
 app.post('/api/categories/:id/enable', authRole(['admin','mainadmin']), async (req, res) => {
   try {
     await ensureCategoriesTable();
-    await migrateCategoriesDefaults();
     const id = req.params.id;
     const enabledRaw = req.body.enabled;
     const enabled = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
@@ -2083,7 +2068,6 @@ app.post('/api/categories/:id/enable', authRole(['admin','mainadmin']), async (r
 app.post('/api/categories/:id/rename', authRole(['admin','mainadmin']), async (req, res) => {
   try {
     await ensureCategoriesTable();
-    await migrateCategoriesDefaults();
     const id = req.params.id;
     const desired = String((req.body?.name || req.body?.newName || '')).trim();
     if (!desired) return res.status(400).json({ error: 'name (or newName) required' });
@@ -2102,7 +2086,6 @@ app.post('/api/categories/:id/rename', authRole(['admin','mainadmin']), async (r
 app.delete('/api/categories/:id', authRole(['admin','mainadmin']), async (req, res) => {
   try {
     await ensureCategoriesTable();
-    await migrateCategoriesDefaults();
     const id = req.params.id;
     const { rows } = await pool.query('DELETE FROM categories WHERE id=$1 RETURNING id,name,enabled,created_at', [id]);
     if (!rows.length) return res.status(404).json({ error: 'category not found' });
@@ -2114,7 +2097,6 @@ app.delete('/api/categories/:id', authRole(['admin','mainadmin']), async (req, r
 app.post('/api/admin/categories/enable', authRole(['admin','mainadmin']), async (req, res) => {
   try {
     await ensureCategoriesTable();
-    await migrateCategoriesDefaults();
     const id = req.body?.id;
     if (!id) return res.status(400).json({ error: 'id required' });
     const enabledRaw = req.body.enabled;
@@ -2128,7 +2110,6 @@ app.post('/api/admin/categories/enable', authRole(['admin','mainadmin']), async 
 app.post('/api/admin/categories/rename', authRole(['admin','mainadmin']), async (req, res) => {
   try {
     await ensureCategoriesTable();
-    await migrateCategoriesDefaults();
     const id = req.body?.id;
     const desired = String((req.body?.name || req.body?.newName || '')).trim();
     if (!id) return res.status(400).json({ error: 'id required' });
@@ -2145,7 +2126,6 @@ app.post('/api/admin/categories/rename', authRole(['admin','mainadmin']), async 
 app.post('/api/admin/categories/delete', authRole(['admin','mainadmin']), async (req, res) => {
   try {
     await ensureCategoriesTable();
-    await migrateCategoriesDefaults();
     const id = req.body?.id;
     if (!id) return res.status(400).json({ error: 'id required' });
     const { rows } = await pool.query('DELETE FROM categories WHERE id=$1 RETURNING id,name,enabled,created_at', [id]);
@@ -2160,7 +2140,6 @@ function rowToCategory(r){ return { id:r.id, name:r.name, enabled:r.enabled, cre
 async function catEnableHandler(req, res) {
   try {
     await ensureCategoriesTable();
-    await migrateCategoriesDefaults();
     const id = (req.params?.id ?? req.body?.id ?? req.query?.id);
     if (!id) return res.status(400).json({ error: 'id required' });
     const enabledRaw = req.body?.enabled ?? req.query?.enabled ?? true;
@@ -2174,7 +2153,6 @@ async function catEnableHandler(req, res) {
 async function catRenameHandler(req, res) {
   try {
     await ensureCategoriesTable();
-    await migrateCategoriesDefaults();
     const id = (req.params?.id ?? req.body?.id ?? req.query?.id);
     const desired = String((req.body?.name || req.body?.newName || req.query?.name || req.query?.newName || '')).trim();
     if (!id) return res.status(400).json({ error: 'id required' });
@@ -2191,7 +2169,6 @@ async function catRenameHandler(req, res) {
 async function catDeleteHandler(req, res) {
   try {
     await ensureCategoriesTable();
-    await migrateCategoriesDefaults();
     const id = (req.params?.id ?? req.body?.id ?? req.query?.id);
     if (!id) return res.status(400).json({ error: 'id required' });
     const { rows } = await pool.query('DELETE FROM categories WHERE id=$1 RETURNING id,name,enabled,created_at', [id]);
@@ -2222,7 +2199,6 @@ app.delete('/admin/categories/:id', authRole(['admin','mainadmin']), catDeleteHa
 async function updateCategoryByIdHandler(req, res) {
   try {
     await ensureCategoriesTable();
-    await migrateCategoriesDefaults();
     const id = req.params.id;
     if (!id) return res.status(400).json({ error: 'id required' });
 
@@ -2265,7 +2241,6 @@ app.patch('/api/categories/:id', authRole(['admin','mainadmin']), updateCategory
 app.get('/api/categories/enabled', authRole(['user','admin','mainadmin']), async (req, res) => {
   try {
     await ensureCategoriesTable();
-    await migrateCategoriesDefaults();
     const { rows } = await pool.query('SELECT id, name, enabled, created_at FROM categories WHERE enabled = true ORDER BY lower(name) ASC');
     res.json(rows);
   } catch (e) {
@@ -2278,7 +2253,6 @@ app.get('/api/categories/enabled', authRole(['user','admin','mainadmin']), async
 app.get('/public/categories', authOptional, async (req, res) => {
   try {
     await ensureCategoriesTable();
-    await migrateCategoriesDefaults();
     const { rows } = await pool.query('SELECT id, name FROM categories WHERE enabled = true ORDER BY lower(name) ASC');
     res.json(rows);
   } catch (e) {
