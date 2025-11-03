@@ -16,36 +16,6 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
-/* ===== MW: Categories GET interceptor (adds isEnabled alias; unifies output) ===== */
-app.use('/api/categories', authRole(['user','admin','mainadmin']), async function catListInterceptor(req, res, next) {
-  try {
-    if (req.method !== 'GET') return next();
-    // Only intercept base and /list
-    const p = req.path || '';
-    if (!(p === '' || p === '/' || p === '/list')) return next();
-
-    await ensureCategoriesTable();
-
-    const role = (req.user && req.user.role) || 'user';
-    const isAdmin = role === 'admin' || role === 'mainadmin';
-    const includeDisabled = ['1','true'].includes(String(req.query.includeDisabled || '').toLowerCase());
-
-    let sql = 'SELECT id, name, enabled, created_at FROM categories';
-    if (!isAdmin && !includeDisabled) sql += ' WHERE enabled = true';
-    sql += ' ORDER BY lower(name) ASC';
-
-    const { rows } = await pool.query(sql);
-    const out = rows.map(r => {
-      const en = (r.enabled === true || r.enabled === 'true' || r.enabled === 1 || r.enabled === '1');
-      return { id: r.id, name: r.name, enabled: en, isEnabled: en, createdAt: r.created_at };
-    });
-    return res.json(out);
-  } catch (e) {
-    console.error('categories list mw error:', e);
-    return res.status(500).send('Failed to list categories');
-  }
-});
-
 /* ===== MW: Admin PUT no-body toggle for /api/admin/categories/:id ===== */
 app.use(async function adminCatsPutToggleMw(req, res, next) {
   try {
