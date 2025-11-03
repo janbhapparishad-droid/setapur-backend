@@ -18,8 +18,58 @@ app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 /* ===== MW: Categories GET interceptor (adds isEnabled alias; unifies output) ===== */
 app.use('/api/categories', authRole(['user','admin','mainadmin']), async function catListInterceptor(req, res, next) {
-  
+  try {
+    if (req.method !== 'GET') return next();
+    // Only intercept base and /list
+    const p = req.path || '';
+    if (!(p === '' || p === '/' || p === '/list')) return next();
 
+    await ensureCategoriesTable();
+
+    const role = (req.user && req.user.role) || 'user';
+    const isAdmin = role === 'admin' || role === 'mainadmin';
+    const includeDisabled = ['1','true'].includes(String(req.query.includeDisabled || '').toLowerCase());
+
+    let sql = 'SELECT id, name, enabled, created_at FROM categories';
+    if (!isAdmin && !includeDisabled) sql += ' WHERE enabled = true';
+    sql += ' ORDER BY lower(name) ASC';
+
+    const { rows } = await pool.query(sql);
+    const out = rows.map(r => {
+      const en = (r.enabled === true || r.enabled === 'true' || r.enabled === 1 || r.enabled === '1');
+      return { id: r.id, name: r.name, enabled: en, isEnabled: en, createdAt: r.created_at };
+
+    return res.json(out);
+  } catch (e) {
+    console.error('categories list mw error:', e);
+    return res.status(500).send('Failed to list categories');
+
+
+
+/* ===== MW: Admin PUT no-body toggle for /api/admin/categories/:id ===== */
+app.use(async function adminCatsPutToggleMw(req, res, next) {
+  try {
+    if (req.method !== 'PUT') return next();
+    // Only match: /api/admin/categories/:id (exact, no suffix path)
+    const m = req.path && req.path.match(/^\/api\/admin\/categories\/(\d+)$/i);
+    if (!m) return next();
+
+    const hasName = (typeof req.body?.name === 'string' && req.body.name.trim())
+                 || (typeof req.body?.newName === 'string' && req.body.newName.trim())
+                 || (typeof req.query?.name === 'string' && req.query.name.trim())
+                 || (typeof req.query?.newName === 'string' && req.query.newName.trim());
+    const hasEnabled = (req.body?.enabled !== undefined) || (req.query?.enabled !== undefined) || (req.body?.isEnabled !== undefined) || (req.query?.isEnabled !== undefined);
+
+    // If any field provided, let normal handler proceed
+    if (hasName || hasEnabled) return next();
+
+    await ensureCategoriesTable();
+    const id = m[1];
+    const { rows } = await pool.query(
+      'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at',
+      [id]
+
+    if (!rows.length) return res.status(404).json({ error: 'category not found' });
 
     const r = rows[0];
     return res.json({ ok: true, toggled: true, category: rowToCategory(r) });
@@ -111,6 +161,8 @@ function authRole(roles) {
       if (err.name === 'TokenExpiredError') return res.status(401).send('Token expired');
       return res.status(400).send('Invalid Token');
 
+  };
+
 /* ====== Minimal Analytics Admin helpers (DB) to avoid missing refs ====== */
 global.AnalyticsAdmin = global.AnalyticsAdmin || {};
 if (!global.AnalyticsAdmin.ensure) {
@@ -123,7 +175,7 @@ if (!global.AnalyticsAdmin.ensure) {
         enabled BOOLEAN DEFAULT TRUE,
         order_index INT DEFAULT 0,
         created_at TIMESTAMPTZ DEFAULT now()
-
+      );
       CREATE TABLE IF NOT EXISTS analytics_events (
         id SERIAL PRIMARY KEY,
         folder_id INT REFERENCES analytics_folders(id) ON DELETE CASCADE,
@@ -133,11 +185,12 @@ if (!global.AnalyticsAdmin.ensure) {
         show_expense_detail BOOLEAN DEFAULT TRUE,
         order_index INT DEFAULT 0,
         created_at TIMESTAMPTZ DEFAULT now()
-
+      );
       CREATE INDEX IF NOT EXISTS idx_analytics_folders_order ON analytics_folders(order_index, lower(name));
       CREATE INDEX IF NOT EXISTS idx_analytics_events_folder ON analytics_events(folder_id);
       CREATE INDEX IF NOT EXISTS idx_analytics_events_order ON analytics_events(folder_id, order_index);
     `);
+  };
 
 if (!global.AnalyticsAdmin.reorderFolders) {
   global.AnalyticsAdmin.reorderFolders = async function reorderFolders(folderId, direction, newIndex) {
@@ -156,6 +209,8 @@ if (!global.AnalyticsAdmin.reorderFolders) {
     for (let i=0;i<list.length;i++) {
       await pool.query('UPDATE analytics_folders SET order_index=$1 WHERE id=$2', [i, list[i]]);
 
+  };
+
 if (!global.AnalyticsAdmin.reorderEvents) {
   global.AnalyticsAdmin.reorderEvents = async function reorderEvents(folderId, eventId, direction, newIndex) {
     const { rows } = await pool.query('SELECT id FROM analytics_events WHERE folder_id=$1 ORDER BY order_index ASC, id ASC', [folderId]);
@@ -172,6 +227,8 @@ if (!global.AnalyticsAdmin.reorderEvents) {
 
     for (let i=0;i<list.length;i++) {
       await pool.query('UPDATE analytics_events SET order_index=$1 WHERE id=$2', [i, list[i]]);
+
+  };
 
 /* ===================== Common helpers ===================== */
 function slugify(s) {
@@ -223,7 +280,7 @@ async function ensureUsersTable() {
       display_name TEXT,
       logged_in TEXT,
       created_at TIMESTAMPTZ DEFAULT now()
-
+    );
   `);
   console.log('DB ready: users table ensured');
 
@@ -239,6 +296,7 @@ function rowToUser(r) {
     displayName: r.display_name || null,
     loggedIn: r.logged_in || null,
     createdAt: r.created_at,
+  };
 
 async function getUsers() {
   await ensureUsersTable();
@@ -278,6 +336,8 @@ async function saveUsers(users) {
         u.displayName || null,
         u.loggedIn || null,
       ]
+    );
+
 
 async function seedAdmin() {
   try {
@@ -370,7 +430,7 @@ async function ensureExpensesTable() {
       paid_to TEXT,
       date TIMESTAMPTZ,
       created_at TIMESTAMPTZ DEFAULT now()
-
+    );
   `);
   await pool.query(`
     ALTER TABLE expenses
@@ -405,7 +465,7 @@ async function ensureDonationsTable() {
       screenshot_url TEXT,
       receipt_code TEXT UNIQUE,
       created_at TIMESTAMPTZ DEFAULT now()
-
+    );
   `);
   await pool.query(`
     ALTER TABLE donations
@@ -427,7 +487,7 @@ async function ensureGalleryTables() {
       slug TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       enabled BOOLEAN DEFAULT TRUE
-
+    );
   `);
   await pool.query(`
     ALTER TABLE gallery_folders
@@ -444,7 +504,7 @@ async function ensureGalleryTables() {
       public_id TEXT UNIQUE NOT NULL,
       url TEXT NOT NULL,
       filename TEXT NOT NULL
-
+    );
   `);
   await pool.query(`
     ALTER TABLE gallery_images
@@ -463,7 +523,7 @@ async function ensureEbooksTables() {
       slug TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       enabled BOOLEAN DEFAULT TRUE
-
+    );
   `);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS ebook_files (
@@ -472,7 +532,7 @@ async function ensureEbooksTables() {
       public_id TEXT UNIQUE NOT NULL,
       url TEXT NOT NULL,
       filename TEXT NOT NULL
-
+    );
   `);
   await pool.query(`
     ALTER TABLE ebook_files
@@ -492,7 +552,7 @@ async function ensureCategoriesTable() {
       name TEXT UNIQUE NOT NULL,
       enabled BOOLEAN DEFAULT TRUE,
       created_at TIMESTAMPTZ DEFAULT now()
-
+    );
   `);
   console.log('DB ready: categories');
 
@@ -513,6 +573,7 @@ const listCategoriesHandler = async (req, res) => {
     console.error('categories list error:', e);
     res.status(500).send('Failed to list categories');
 
+};
 const createCategoryHandler = async (req, res) => {
   try {
     await ensureCategoriesTable();
@@ -524,13 +585,14 @@ const createCategoryHandler = async (req, res) => {
     const { rows } = await pool.query(
       'INSERT INTO categories(name, enabled) VALUES ($1, TRUE) ON CONFLICT (name) DO NOTHING RETURNING id, name, enabled, created_at',
       [nm]
-
+    );
     if (!rows.length) return res.status(409).json({ error: 'category already exists' });
     return res.status(201).json(rowToCategory(rows[0]));
   } catch (e) {
     console.error('categories create error:', e);
     return res.status(500).json({ error: 'Create failed', code: e.code || null, detail: e.message || String(e) });
 
+};
 app.get('/api/categories', authRole(['user','admin','mainadmin']), listCategoriesHandler);
 app.post('/api/categories', authRole(['admin','mainadmin']), createCategoryHandler);
 // FE aliases
@@ -556,6 +618,7 @@ function rowToExpense(r) {
     approvedBy: r.approved_by,
     approvedById: r.approved_by_id,
     approvedAt: r.approved_at
+  };
 
 app.get('/api/expenses/list', authRole(['user','admin','mainadmin']), async (req, res) => {
   try {
@@ -594,7 +657,7 @@ app.get('/api/expenses/list', authRole(['user','admin','mainadmin']), async (req
         let mineWhere = where.length ? ' AND ' + where.join(' AND ') : '';
         const { rows: mine } = await pool.query(
           `SELECT * FROM expenses WHERE submitted_by = $${mineVals.length} AND approved = false${mineWhere}`, mineVals
-
+        );
         const seen = new Set(list.map(x=>x.id));
         for (const r of mine) { if (!seen.has(r.id)) list.push(rowToExpense(r)); }
 
@@ -620,7 +683,7 @@ app.post('/api/expenses/submit', authRole(['user','admin','mainadmin']), async (
       `INSERT INTO expenses (amount, category, description, paid_to, date, created_at, updated_at, enabled, approved, status, submitted_by, submitted_by_id)
        VALUES ($1,$2,$3,$4,$5,$6,$6,true,false,'pending',$7,$8) RETURNING *`,
       [amt, cat, (description||'').trim(), (paidTo||'').trim(), date ? new Date(date) : now, now, req.user?.username || null, req.user?.id || null]
-
+    );
     const e = rowToExpense(rows[0]);
     if (e.submittedBy) {
       pushNotification(e.submittedBy, {
@@ -655,7 +718,7 @@ app.post('/api/expenses', authRole(['admin','mainadmin']), async (req, res) => {
       [amt, cat, (description||'').trim(), (paidTo||'').trim(), date ? new Date(date) : now, now,
        approve, (approve ? 'approved' : 'pending'), req.user?.username || null, req.user?.id || null,
        approve ? req.user?.username : null, approve ? req.user?.id : null, approve ? now : null]
-
+    );
     res.status(201).json({ message: 'Expense created', expense: rowToExpense(rows[0]) });
   } catch (err) {
     console.error('create expense error:', err);
@@ -713,7 +776,7 @@ app.post('/api/expenses/:id/enable', authRole(['admin','mainadmin']), async (req
     const enabled = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
     const { rows } = await pool.query(
       `UPDATE expenses SET enabled=$1, updated_at=now() WHERE id=$2 RETURNING *`, [enabled, id]
-
+    );
     if (!rows.length) return res.status(404).json({ error: 'Expense not found' });
     res.json({ ok: true, expense: rowToExpense(rows[0]) });
   } catch (e) {
@@ -733,7 +796,7 @@ app.post('/admin/expenses/:id/approve', authRole(['admin','mainadmin']), async (
       `UPDATE expenses SET approved=$1, status=$2, approved_by=$3, approved_by_id=$4, approved_at=$5, updated_at=now()
        WHERE id=$6 RETURNING *`,
       [approve, approve ? 'approved' : 'pending', req.user.username, req.user.id, approve ? new Date() : null, id]
-
+    );
     if (!rows.length) return res.status(404).json({ error: 'Expense not found' });
 
     const e = rowToExpense(rows[0]);
@@ -776,7 +839,7 @@ const uploadDonation = multer({ storage: donationScreenshotStorage, limits: { fi
 async function receiptCodeExists(code) {
   const { rows } = await pool.query(
     'SELECT 1 FROM donations WHERE upper(receipt_code) = upper($1) LIMIT 1', [code]
-
+  );
   return rows.length > 0;
 
 async function generateUniqueReceiptCodeDB() {
@@ -807,6 +870,7 @@ function rowToDonation(r) {
     approvedByRole: r.approved_by_role,
     approvedByName: r.approved_by_name,
     approvedAt: r.approved_at
+  };
 
 async function createDonationHandler(req, res) {
   try {
@@ -827,7 +891,7 @@ async function createDonationHandler(req, res) {
        RETURNING *`,
       [req.user.id, req.user.username, String(donorName).trim(), Number(amount), paymentMethod, category,
        cashReceiverName || null, screenshotPublicId, screenshotUrl, code]
-
+    );
     res.status(201).json({ message: 'Donation submitted', donation: rowToDonation(rows[0]) });
   } catch (err) {
     console.error('submit-donation error:', err);
@@ -838,12 +902,13 @@ app.post('/api/donations/submit-donation',
   authRole(['user','admin','mainadmin']),
   uploadDonation.single('screenshot'),
   createDonationHandler
-
+);
 // Alias direct to same handler
 app.post('/api/donations/create',
   authRole(['user','admin','mainadmin']),
   uploadDonation.single('screenshot'),
   createDonationHandler
+);
 
 app.get('/myaccount/receipts', authRole(['user','admin','mainadmin']), async (req, res) => {
   await ensureDonationsTable();
@@ -852,7 +917,7 @@ app.get('/myaccount/receipts', authRole(['user','admin','mainadmin']), async (re
     `SELECT * FROM donations WHERE approved = true AND (
       donor_username = $1 OR donor_name = $1
     ) ORDER BY created_at DESC`, [username]
-
+  );
   res.json(rows.map(rowToDonation));
 });
 
@@ -987,7 +1052,7 @@ app.post('/admin/donations/:id/approve', authRole(['admin', 'mainadmin']), async
        WHERE id=$6
        RETURNING *`,
       [req.user.username, req.user.id, req.user.role, approvedByName, rc, id]
-
+    );
     const out = rowToDonation(upd[0]);
 
     if (!alreadyApproved) {
@@ -1017,7 +1082,7 @@ app.post('/admin/donations/:id/disapprove', authRole(['admin', 'mainadmin']), as
       `UPDATE donations SET approved=false, status='pending',
        approved_by=NULL, approved_by_id=NULL, approved_by_role=NULL, approved_by_name=NULL, approved_at=NULL, updated_at=now()
        WHERE id=$1 RETURNING *`, [id]
-
+    );
     if (!rows.length) return res.status(404).json({ error: 'Donation not found' });
     res.json({ message: 'Donation set to pending', donation: rowToDonation(rows[0]) });
   } catch (err) {
@@ -1088,7 +1153,7 @@ const uploadGalleryCloud = multer({
         public_id: `${Date.now()}-${Math.round(Math.random()*1e9)}-${safeBase}`,
         allowed_formats: ['jpg','jpeg','png','webp','gif'],
         resource_type: 'image'
-
+      };
     },
   }),
   limits: { fileSize: 20 * 1024 * 1024, files: 25 },
@@ -1103,12 +1168,13 @@ async function ensureGalleryFolder(slug, name) {
      VALUES ($1,$2,true, COALESCE((SELECT COALESCE(MAX(order_index),-1)+1 FROM gallery_folders),0))
      ON CONFLICT (slug) DO NOTHING`,
     [s, n]
+  );
 
 async function reorderGalleryImages(folderSlug, targetIdOrName, direction, newIndex) {
   const { rows } = await pool.query(
     'SELECT id, filename FROM gallery_images WHERE folder_slug=$1 ORDER BY order_index ASC, id ASC',
     [folderSlug]
-
+  );
   let list = rows.map(r => ({ id: r.id, name: r.filename }));
   let idx = list.findIndex(x => String(x.id) === String(targetIdOrName) || String(x.name) === String(targetIdOrName));
   if (idx === -1) return;
@@ -1128,7 +1194,7 @@ async function reorderGalleryImages(folderSlug, targetIdOrName, direction, newIn
 async function reorderGalleryFolders(slug, direction, newIndex) {
   const { rows } = await pool.query(
     'SELECT slug FROM gallery_folders ORDER BY order_index ASC, lower(name) ASC'
-
+  );
   let list = rows.map(r => r.slug);
   let idx = list.indexOf(slug);
   if (idx === -1) return;
@@ -1187,7 +1253,7 @@ app.post('/gallery/folders/create', authRole(['admin', 'mainadmin']), async (req
       `INSERT INTO gallery_folders (slug, name, enabled, order_index)
        VALUES ($1,$2,true, COALESCE((SELECT COALESCE(MAX(order_index),-1)+1 FROM gallery_folders),0))`,
       [slug, String(name).trim()]
-
+    );
     res.status(201).json({ name: String(name).trim(), slug });
   } catch (e) {
     if (String(e.message || '').toLowerCase().includes('duplicate')) return res.status(409).json({ error: 'folder already exists' });
@@ -1215,7 +1281,7 @@ async function insertGalleryUploadsToDB(req, res) {
         `INSERT INTO gallery_images (folder_slug, public_id, url, filename, enabled, order_index, bytes)
          VALUES ($1,$2,$3,$4,true,$5,NULL) RETURNING *`,
         [slug, f.filename, f.path, filename, order++]
-
+      );
       inserted.push(rows[0]);
 
     res.status(201).json({ uploaded: inserted.map(r => ({ id:r.id, filename:r.filename, url:r.url })), count: inserted.length });
@@ -1225,6 +1291,7 @@ app.post('/gallery/folders/:slug/upload',
   authRole(['admin', 'mainadmin']),
   uploadGalleryCloud.array('images', 25),
   insertGalleryUploadsToDB
+);
 
 // Root images: list
 async function listRootGalleryImages(req, res) {
@@ -1352,7 +1419,7 @@ app.post('/gallery/folders/:slug/rename', authRole(['admin', 'mainadmin']), asyn
       await pool.query(
         'INSERT INTO gallery_folders (slug, name, enabled, order_index, cover_public_id, cover_url, icon_public_id, icon_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (slug) DO NOTHING',
         [newSlug, desired, exists[0].enabled, exists[0].order_index, exists[0].cover_public_id, exists[0].cover_url, exists[0].icon_public_id, exists[0].icon_key]
-
+      );
       await pool.query('UPDATE gallery_images SET folder_slug=$1 WHERE folder_slug=$2', [newSlug, slug]);
       await pool.query('DELETE FROM gallery_folders WHERE slug=$1', [slug]);
     } else {
@@ -1435,6 +1502,7 @@ app.post('/gallery/folders/:slug/images/rename', authRole(['admin', 'mainadmin']
     const { rows: upd } = await pool.query(
       'UPDATE gallery_images SET public_id=$1, url=$2, filename=$3 WHERE id=$4 RETURNING *',
       [newPublicId, newUrl, `${safeBase}${path.extname(row.filename)}`, row.id]
+    );
 
     res.json({ ok: true, filename: upd[0].filename, url: upd[0].url });
   } catch (e) {
@@ -1543,7 +1611,7 @@ const uploadEbooksCloud = multer({
         public_id: `${Date.now()}-${Math.round(Math.random()*1e9)}-${safeBase}`,
         resource_type: 'raw',
         allowed_formats: ['pdf']
-
+      };
     },
   }),
   limits: { fileSize: 100 * 1024 * 1024, files: 25 },
@@ -1624,7 +1692,7 @@ app.post('/ebooks/folders/create', authRole(['admin','mainadmin']), async (req, 
       `INSERT INTO ebook_folders (slug, name, enabled)
        VALUES ($1,$2,true)`,
       [slug, String(name).trim()]
-
+    );
     res.status(201).json({ name: String(name).trim(), slug });
   } catch (e) {
     if (String(e.message || '').toLowerCase().includes('duplicate')) return res.status(409).json({ error: 'folder already exists' });
@@ -1718,7 +1786,7 @@ app.post('/ebooks/upload', authRole(['admin','mainadmin']), uploadEbooksCloud.ar
         `INSERT INTO ebook_files (folder_slug, public_id, url, filename, enabled, order_index)
          VALUES (NULL,$1,$2,$3,true,$4) RETURNING *`,
         [f.filename, f.path, filename, order++]
-
+      );
       inserted.push(rows[0]);
 
     res.status(201).json({ uploaded: inserted.map(r => ({ id:r.id, filename:r.filename, url:r.url })), count: inserted.length });
@@ -1742,7 +1810,7 @@ app.post('/ebooks/folders/:slug/upload', authRole(['admin','mainadmin']), upload
         `INSERT INTO ebook_files (folder_slug, public_id, url, filename, enabled, order_index)
          VALUES ($1,$2,$3,$4,true,$5) RETURNING *`,
         [slug, f.filename, f.path, filename, order++]
-
+      );
       inserted.push(rows[0]);
 
     res.status(201).json({ uploaded: inserted.map(r => ({ id:r.id, filename:r.filename, url:r.url })), count: inserted.length, folder: slug });
@@ -1778,7 +1846,7 @@ app.post('/ebooks/files/rename', authRole(['admin','mainadmin']), async (req, re
     const { rows: upd } = await pool.query(
       'UPDATE ebook_files SET public_id=$1, url=$2, filename=$3 WHERE id=$4 RETURNING *',
       [newPublicId, newUrl, `${safeBase}${path.extname(row.filename)}`, row.id]
-
+    );
     res.json({ ok: true, filename: upd[0].filename, url: upd[0].url });
   } catch (e) {
     console.error('ebooks root rename error:', e);
@@ -1848,7 +1916,7 @@ async function reorderEbookFiles(folderSlug, targetIdOrName, direction, newIndex
   const vals = folderSlug ? [folderSlug] : [];
   const { rows } = await pool.query(
     `SELECT id, filename FROM ebook_files WHERE ${cond} ORDER BY order_index ASC, id ASC`, vals
-
+  );
   let list = rows.map(r => ({ id: r.id, name: r.filename }));
   let idx = list.findIndex(x => String(x.id) === String(targetIdOrName) || String(x.name) === String(targetIdOrName));
   if (idx === -1) return;
@@ -2078,7 +2146,7 @@ app.post('/api/categories/:id/enable', authRole(['admin','mainadmin']), async (r
       const { rows } = await pool.query(
         'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at',
         [id]
-
+      );
       if (!rows.length) return res.status(404).json({ error: 'category not found' });
       return res.json({ ok: true, toggled: true, category: rowToCategory(rows[0]) });
 
@@ -2086,7 +2154,7 @@ app.post('/api/categories/:id/enable', authRole(['admin','mainadmin']), async (r
     const { rows } = await pool.query(
       'UPDATE categories SET enabled=$1 WHERE id=$2 RETURNING *',
       [enabled, id]
-
+    );
     if (!rows.length) return res.status(404).json({ error: 'category not found' });
     res.json({ ok: true, category: rowToCategory(rows[0]) });
   } catch (e) {
@@ -2105,7 +2173,7 @@ app.post('/api/categories/:id/rename', authRole(['admin','mainadmin']), async (r
     if (!desired) return res.status(400).json({ error: 'name (or newName) required' });
     const { rows } = await pool.query(
       'UPDATE categories SET name=$1 WHERE id=$2 RETURNING id,name,enabled,created_at', [desired, id]
-
+    );
     if (!rows.length) return res.status(404).json({ error: 'category not found' });
     res.json({ ok:true, category: rowToCategory(rows[0]) });
   } catch(e){
@@ -2238,7 +2306,7 @@ async function catAdminPutHandler(req, res) {
     const { rows } = await pool.query(
       'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at',
       [id]
-
+    );
     if (!rows.length) return res.status(404).json({ error: 'category not found' });
     return res.json({ ok: true, toggled: true, category: rowToCategory(rows[0]) });
   } catch (e) {
@@ -2261,7 +2329,7 @@ app.put('/api/admin/categories/:id', authRole(['admin','mainadmin']), async func
     const { rows } = await pool.query(
       'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at',
       [id]
-
+    );
     if (!rows.length) return res.status(404).json({ error: 'category not found' });
     return res.json({ ok: true, toggled: true, category: rowToCategory(rows[0]) });
   } catch (e) {
@@ -2313,7 +2381,7 @@ async function catToggleHandler(req, res) {
     const { rows } = await pool.query(
       'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id= RETURNING id,name,enabled,created_at',
       [id]
-
+    );
     if (!rows.length) return res.status(404).json({ error: 'category not found' });
     const r = rows[0];
     return res.json({ ok: true, toggled: true, category: rowToCategory(r) });
