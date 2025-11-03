@@ -16,6 +16,40 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
+/* ===== MW: Admin PUT no-body toggle for /api/admin/categories/:id ===== */
+app.use(async function adminCatsPutToggleMw(req, res, next) {
+  try {
+    if (req.method !== 'PUT') return next();
+    // Only match: /api/admin/categories/:id (exact, no suffix path)
+    const m = req.path && req.path.match(/^\/api\/admin\/categories\/(\d+)$/i);
+    if (!m) return next();
+
+    const hasName = (typeof req.body?.name === 'string' && req.body.name.trim())
+                 || (typeof req.body?.newName === 'string' && req.body.newName.trim())
+                 || (typeof req.query?.name === 'string' && req.query.name.trim())
+                 || (typeof req.query?.newName === 'string' && req.query.newName.trim());
+    const hasEnabled = (req.body?.enabled !== undefined) || (req.query?.enabled !== undefined);
+
+    // If any field provided, let normal handler proceed
+    if (hasName || hasEnabled) return next();
+
+    await ensureCategoriesTable();
+    const id = m[1];
+    const { rows } = await pool.query(
+      'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at',
+      [id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'category not found' });
+
+    const r = rows[0];
+    return res.json({ ok: true, toggled: true, category: { id: r.id, name: r.name, enabled: r.enabled, createdAt: r.created_at } });
+  } catch (e) {
+    console.error('admin PUT toggle mw error:', e);
+    return res.status(500).send('Category toggle failed');
+  }
+});
+
+
 // Request log
 app.use((req, res, next) => {
   console.log(new Date().toISOString(), req.method, req.originalUrl);
@@ -509,7 +543,7 @@ const listCategoriesHandler = async (req, res) => {
     if (!isAdmin && !includeDisabled) sql += ' WHERE enabled = true';
     sql += ' ORDER BY lower(name) ASC';
     const { rows } = await pool.query(sql);
-    res.json(rows.map(rowToCategory));
+    res.json(rows);
   } catch (e) {
     console.error('categories list error:', e);
     res.status(500).send('Failed to list categories');
@@ -687,7 +721,18 @@ app.put('/api/expenses/:id', authRole(['admin','mainadmin']), async (req, res) =
     if (body.date) { fields.push(`date = $${idx++}`); vals.push(new Date(body.date)); }
     if (body.enabled !== undefined) { fields.push(`enabled = $${idx++}`); vals.push(!(body.enabled === false || body.enabled === 'false')); }
 
-    if (!fields.length) return res.status(400).json({ error: 'no fields to update' });
+    if (!fields.length) {
+    try {
+      const { rows: cur } = await pool.query('SELECT id,name,enabled,created_at FROM categories WHERE id=$1', [id]);
+      if (!cur.length) return res.status(404).json({ error: 'category not found' });
+      const { rows } = await pool.query('UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at', [id]);
+      const r = rows[0];
+      return res.json({ ok: true, toggled: true, category: { id: r.id, name: r.name, enabled: r.enabled, createdAt: r.created_at } });
+    } catch (e) {
+      console.error('categories PUT/PATCH toggle error:', e);
+      return res.status(500).send('Category toggle failed');
+    }
+  }
 
     fields.push(`updated_at = now()`);
     vals.push(id);
@@ -2073,12 +2118,7 @@ app.post('/admin/create-user', authRole(['admin','mainadmin']), async (req, res)
   }
 });
 /* ===================== Categories: enable/rename/delete ===================== */
-function rowToCategory(r) {
-  const en = (r.enabled === true || r.enabled === 'true' || r.enabled === 1 || r.enabled === '1');
-  return { id: r.id, name: r.name, enabled: en, isEnabled: en, createdAt: r.created_at };
-}
-;
-; }
+function rowToCategory(r){ return { id:r.id, name:r.name, enabled:r.enabled, createdAt:r.created_at }; }
 
 // Enable/Disable by param id
 app.post('/api/categories/:id/enable', authRole(['admin','mainadmin']), async (req, res) => {
@@ -2095,6 +2135,7 @@ app.post('/api/categories/:id/enable', authRole(['admin','mainadmin']), async (r
       );
       if (!rows.length) return res.status(404).json({ error: 'category not found' });
       return res.json({ ok: true, toggled: true, category: rowToCategory(rows[0]) });
+    }
 
     const enabled = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
     const { rows } = await pool.query(
@@ -2106,6 +2147,7 @@ app.post('/api/categories/:id/enable', authRole(['admin','mainadmin']), async (r
   } catch (e) {
     console.error('categories enable error:', e);
     res.status(500).send('Failed to update category');
+  }
 });
 
 // Rename by param id
@@ -2124,6 +2166,7 @@ app.post('/api/categories/:id/rename', authRole(['admin','mainadmin']), async (r
   } catch(e){
     if ((e.code||'').startsWith('23')) return res.status(409).json({ error: 'category already exists' });
     console.error('categories rename error:', e); res.status(500).send('Failed to rename category');
+  }
 });
 
 // Delete by param id
@@ -2183,15 +2226,7 @@ app.post('/api/admin/categories/delete', authRole(['admin','mainadmin']), async 
 });
 /* ===================== End: Categories mgmt ===================== */
 /* ===== Categories mgmt: enable/rename/delete with broad aliases ===== */
-function rowToCategory(r) {
-  const en = (r.enabled === true || r.enabled === 'true' || r.enabled === 1 || r.enabled === '1');
-  return { id: r.id, name: r.name, enabled: en, isEnabled: en, createdAt: r.created_at };
-}
-;
-}
-;
-}
-; }
+function rowToCategory(r){ return { id:r.id, name:r.name, enabled:r.enabled, createdAt:r.created_at }; }
 
 async function catEnableHandler(req, res) {
   try {
@@ -2263,7 +2298,7 @@ async function updateCategoryByIdHandler(req, res) {
     if (!id) return res.status(400).json({ error: 'id required' });
 
     const nameIn = (req.body?.name ?? req.body?.newName ?? req.query?.name ?? req.query?.newName);
-    const enabledRaw = (req.body?.enabled ?? req.query?.enabled ?? req.body?.isEnabled ?? req.query?.isEnabled);
+    const enabledRaw = (req.body?.enabled ?? req.query?.enabled);
 
     const fields = []; const vals = []; let idx = 1;
 
@@ -2300,7 +2335,7 @@ async function catAdminPutHandler(req, res) {
                  || (typeof req.body?.newName === 'string' && req.body.newName.trim())
                  || (typeof req.query?.name === 'string' && req.query.name.trim())
                  || (typeof req.query?.newName === 'string' && req.query.newName.trim());
-    const hasEnabled = (req.body?.enabled !== undefined) || (req.query?.enabled !== undefined) || (req.body?.isEnabled !== undefined) || (req.query?.isEnabled !== undefined);|| (req.body?.isEnabled !== undefined) || (req.query?.isEnabled !== undefined);|| (req.body?.isEnabled !== undefined) || (req.query?.isEnabled !== undefined);|| (req.body?.isEnabled !== undefined) || (req.query?.isEnabled !== undefined); || (req.body?.isEnabled !== undefined) || (req.query?.isEnabled !== undefined);
+    const hasEnabled = (req.body?.enabled !== undefined) || (req.query?.enabled !== undefined);
 
     // If explicit fields provided, delegate to the normal updater
     if (hasName || hasEnabled) {
@@ -2327,7 +2362,7 @@ app.put('/api/admin/categories/:id', authRole(['admin','mainadmin']), async func
                  || (typeof req.body?.newName === 'string' && req.body.newName.trim())
                  || (typeof req.query?.name === 'string' && req.query.name.trim())
                  || (typeof req.query?.newName === 'string' && req.query.newName.trim());
-    const hasEnabled = (req.body?.enabled !== undefined) || (req.query?.enabled !== undefined) || (req.body?.isEnabled !== undefined) || (req.query?.isEnabled !== undefined);|| (req.body?.isEnabled !== undefined) || (req.query?.isEnabled !== undefined);|| (req.body?.isEnabled !== undefined) || (req.query?.isEnabled !== undefined);|| (req.body?.isEnabled !== undefined) || (req.query?.isEnabled !== undefined); || (req.body?.isEnabled !== undefined) || (req.query?.isEnabled !== undefined);
+    const hasEnabled = (req.body?.enabled !== undefined) || (req.query?.enabled !== undefined);
 
     if (hasName || hasEnabled) return next('route'); // let the next route handle explicit updates
 
@@ -2356,7 +2391,7 @@ app.get('/api/categories/enabled', authRole(['user','admin','mainadmin']), async
     await ensureCategoriesTable();
 
     const { rows } = await pool.query('SELECT id, name, enabled, created_at FROM categories WHERE enabled = true ORDER BY lower(name) ASC');
-    res.json(rows.map(rowToCategory));
+    res.json(rows);
   } catch (e) {
     console.error('categories enabled-list error:', e);
     res.status(500).send('Failed to list categories');
@@ -2386,7 +2421,7 @@ async function catToggleHandler(req, res) {
     const id = req.params?.id;
     if (!id) return res.status(400).json({ error: 'id required' });
     const { rows } = await pool.query(
-      'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at',
+      'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id= RETURNING id,name,enabled,created_at',
       [id]
     );
     if (!rows.length) return res.status(404).json({ error: 'category not found' });
