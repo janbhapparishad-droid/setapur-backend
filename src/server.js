@@ -2078,7 +2078,6 @@ function rowToCategory(r) {
   return { id: r.id, name: r.name, enabled: en, isEnabled: en, createdAt: r.created_at };
 }
 ;
-}
 ; }
 
 // Enable/Disable by param id
@@ -2096,7 +2095,6 @@ app.post('/api/categories/:id/enable', authRole(['admin','mainadmin']), async (r
       );
       if (!rows.length) return res.status(404).json({ error: 'category not found' });
       return res.json({ ok: true, toggled: true, category: rowToCategory(rows[0]) });
-    }
 
     const enabled = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
     const { rows } = await pool.query(
@@ -2108,7 +2106,6 @@ app.post('/api/categories/:id/enable', authRole(['admin','mainadmin']), async (r
   } catch (e) {
     console.error('categories enable error:', e);
     res.status(500).send('Failed to update category');
-  }
 });
 
 // Rename by param id
@@ -2127,7 +2124,6 @@ app.post('/api/categories/:id/rename', authRole(['admin','mainadmin']), async (r
   } catch(e){
     if ((e.code||'').startsWith('23')) return res.status(409).json({ error: 'category already exists' });
     console.error('categories rename error:', e); res.status(500).send('Failed to rename category');
-  }
 });
 
 // Delete by param id
@@ -2190,6 +2186,8 @@ app.post('/api/admin/categories/delete', authRole(['admin','mainadmin']), async 
 function rowToCategory(r) {
   const en = (r.enabled === true || r.enabled === 'true' || r.enabled === 1 || r.enabled === '1');
   return { id: r.id, name: r.name, enabled: en, isEnabled: en, createdAt: r.created_at };
+}
+;
 }
 ;
 }
