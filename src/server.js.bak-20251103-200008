@@ -2295,34 +2295,6 @@ async function updateCategoryByIdHandler(req, res) {
 }
 
 /* ===== Pre-route: admin PUT toggle when no body/params provided ===== */
-
-async function catAdminPutHandler(req, res) {
-  try {
-    const hasName = (typeof req.body?.name === 'string' && req.body.name.trim())
-                 || (typeof req.body?.newName === 'string' && req.body.newName.trim())
-                 || (typeof req.query?.name === 'string' && req.query.name.trim())
-                 || (typeof req.query?.newName === 'string' && req.query.newName.trim());
-    const hasEnabled = (req.body?.enabled !== undefined) || (req.query?.enabled !== undefined);
-
-    // If explicit fields provided, delegate to the normal updater
-    if (hasName || hasEnabled) {
-      return updateCategoryByIdHandler(req, res);
-    }
-
-    // No fields -> TOGGLE
-    await ensureCategoriesTable();
-    const id = req.params.id;
-    const { rows } = await pool.query(
-      'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at',
-      [id]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'category not found' });
-    return res.json({ ok: true, toggled: true, category: rowToCategory(rows[0]) });
-  } catch (e) {
-    console.error('catAdminPutHandler error:', e);
-    return res.status(500).send('Category update failed');
-  }
-}
 app.put('/api/admin/categories/:id', authRole(['admin','mainadmin']), async function adminPreToggleNoBody(req, res, next) {
   try {
     const hasName = (typeof req.body?.name === 'string' && req.body.name.trim())
