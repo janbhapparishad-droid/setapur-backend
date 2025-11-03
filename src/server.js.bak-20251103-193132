@@ -2091,30 +2091,16 @@ function rowToCategory(r){ return { id:r.id, name:r.name, enabled:r.enabled, cre
 app.post('/api/categories/:id/enable', authRole(['admin','mainadmin']), async (req, res) => {
   try {
     await ensureCategoriesTable();
+
     const id = req.params.id;
-
-    // Accept enabled from body or query; if missing, TOGGLE
-    const enabledRaw = (req.body?.enabled ?? req.query?.enabled);
-    if (enabledRaw === undefined) {
-      const { rows } = await pool.query(
-        'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at',
-        [id]
-      );
-      if (!rows.length) return res.status(404).json({ error: 'category not found' });
-      return res.json({ ok: true, toggled: true, category: rowToCategory(rows[0]) });
-    }
-
+    const enabledRaw = req.body.enabled;
     const enabled = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
     const { rows } = await pool.query(
-      'UPDATE categories SET enabled=$1 WHERE id=$2 RETURNING *',
-      [enabled, id]
+      'UPDATE categories SET enabled=$1 WHERE id=$2 RETURNING id,name,enabled,created_at', [enabled, id]
     );
     if (!rows.length) return res.status(404).json({ error: 'category not found' });
-    res.json({ ok: true, category: rowToCategory(rows[0]) });
-  } catch (e) {
-    console.error('categories enable error:', e);
-    res.status(500).send('Failed to update category');
-  }
+    res.json({ ok:true, category: rowToCategory(rows[0]) });
+  } catch(e){ console.error('categories enable error:', e); res.status(500).send('Failed to update category'); }
 });
 
 // Rename by param id
