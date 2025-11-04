@@ -483,6 +483,14 @@ app.patch('/admin/users/:id', authRole(BAN_ROLES), async (req, res) => {
   }
 });
 
+// Aliases for frontend calling /admin/ban-user
+app.post('/admin/ban-user', authRole(BAN_ROLES), handleUserBanBody);
+app.post('/api/admin/ban-user', authRole(BAN_ROLES), handleUserBanBody);
+
+// Optional: param-based alias too
+app.post('/admin/ban-user/:id', authRole(BAN_ROLES), handleUserBanToggleOrSet);
+app.post('/api/admin/ban-user/:id', authRole(BAN_ROLES), handleUserBanToggleOrSet);
+
 /* ===================== DB Schema Ensures (with ALTERs) ===================== */
 async function ensureExpensesTable() {
   await pool.query(`
