@@ -393,6 +393,96 @@ app.get('/admin/users', authRole(['admin','mainadmin']), async (req, res) => {
   res.json(users.map(u => ({ id: u.id, username: u.username, role: u.role, banned: !!u.banned })));
 });
 
+/* ===== Admin: Ban/Unban Users ===== */
+function toBool(x) { return x === true || x === 'true' || x === 1 || x === '1'; }
+
+// Core: Toggle ya explicit set banned by id OR username (path :id can be numeric id or username)
+async function handleUserBanToggleOrSet(req, res) {
+  try {
+    await ensureUsersTable();
+
+    const idOrUsername = String(req.params.id || '').trim();
+    if (!idOrUsername) return res.status(400).json({ error: 'id or username required' });
+
+    // Safety: khud ko ban/unban mat karo (optional)
+    if (String(req.user.id) === idOrUsername || String(req.user.username) === idOrUsername) {
+      return res.status(400).json({ error: 'cannot ban yourself' });
+    }
+
+    const explicitProvided = (req.body?.banned !== undefined) || (req.query?.banned !== undefined);
+    const isId = /^\d+$/.test(idOrUsername);
+    const where = isId ? 'id=$1' : 'username=$1';
+    const vals = [isId ? Number(idOrUsername) : idOrUsername];
+
+    let sql, params;
+    if (explicitProvided) {
+      const banned = toBool(req.body?.banned ?? req.query?.banned);
+      sql = `UPDATE users SET banned=$2 WHERE ${where} RETURNING id, username, role, banned`;
+      params = [...vals, banned];
+    } else {
+      sql = `UPDATE users SET banned=NOT COALESCE(banned,false) WHERE ${where} RETURNING id, username, role, banned`;
+      params = vals;
+    }
+
+    const { rows } = await pool.query(sql, params);
+    if (!rows.length) return res.status(404).json({ error: 'user not found' });
+    return res.json({ ok: true, user: rows[0] });
+  } catch (e) {
+    console.error('ban/unban user error:', e);
+    return res.status(500).json({ error: 'Failed to update user banned status' });
+  }
+}
+
+// Body-based: { id } ya { username } + optional { banned }
+async function handleUserBanBody(req, res) {
+  const id = req.body?.id || req.query?.id || req.body?.username || req.query?.username;
+  if (!id) return res.status(400).json({ error: 'id or username required' });
+  req.params = req.params || {};
+  req.params.id = String(id);
+  return handleUserBanToggleOrSet(req, res);
+}
+
+// Kaun kar sakta: admin + mainadmin (zarurat ho to sirf mainadmin rakho)
+const BAN_ROLES = ['admin','mainadmin'];
+
+// REST-style: id/username as :id
+app.post('/admin/users/:id/ban', authRole(BAN_ROLES), handleUserBanToggleOrSet);
+app.post('/api/admin/users/:id/ban', authRole(BAN_ROLES), handleUserBanToggleOrSet);
+
+// Body-based aliases (Admin app me id/username body me bhejna easy hota hai)
+app.post('/admin/users/ban', authRole(BAN_ROLES), handleUserBanBody);
+app.post('/api/admin/users/ban', authRole(BAN_ROLES), handleUserBanBody);
+
+// Optional: direct unban endpoints (force false)
+app.post('/admin/users/:id/unban', authRole(BAN_ROLES), (req,res)=>{ req.body=req.body||{}; req.body.banned=false; handleUserBanToggleOrSet(req,res); });
+app.post('/api/admin/users/:id/unban', authRole(BAN_ROLES), (req,res)=>{ req.body=req.body||{}; req.body.banned=false; handleUserBanToggleOrSet(req,res); });
+
+// Optional: PATCH generic user update (abhi sirf banned)
+app.patch('/admin/users/:id', authRole(BAN_ROLES), async (req, res) => {
+  try {
+    await ensureUsersTable();
+    const idOrUsername = String(req.params.id || '').trim();
+    if (!idOrUsername) return res.status(400).json({ error: 'id or username required' });
+
+    const fields = []; const vals = []; let idx = 1;
+    if (req.body?.banned !== undefined) { fields.push(`banned = $${idx++}`); vals.push(toBool(req.body.banned)); }
+    if (!fields.length) return res.status(400).json({ error: 'no fields to update' });
+
+    const isId = /^\d+$/.test(idOrUsername);
+    const where = isId ? `id = $${idx}` : `username = $${idx}`;
+    vals.push(isId ? Number(idOrUsername) : idOrUsername);
+
+    const sql = `UPDATE users SET ${fields.join(', ')} WHERE ${where} RETURNING id, username, role, banned`;
+    const { rows } = await pool.query(sql, vals);
+    if (!rows.length) return res.status(404).json({ error: 'user not found' });
+
+    res.json({ ok: true, user: rows[0] });
+  } catch (e) {
+    console.error('patch user error:', e);
+    res.status(500).json({ error: 'Failed to update user' });
+  }
+});
+
 /* ===================== DB Schema Ensures (with ALTERs) ===================== */
 async function ensureExpensesTable() {
   await pool.query(`
