@@ -25,9 +25,9 @@ app.use(async function adminCatsPutToggleMw(req, res, next) {
     if (!m) return next();
 
     const hasName = (typeof req.body?.name === 'string' && req.body.name.trim())
-                  || (typeof req.body?.newName === 'string' && req.body.newName.trim())
-                  || (typeof req.query?.name === 'string' && req.query.name.trim())
-                  || (typeof req.query?.newName === 'string' && req.query.newName.trim());
+                 || (typeof req.body?.newName === 'string' && req.body.newName.trim())
+                 || (typeof req.query?.name === 'string' && req.query.name.trim())
+                 || (typeof req.query?.newName === 'string' && req.query.newName.trim());
     const hasEnabled = (req.body?.enabled !== undefined) || (req.query?.enabled !== undefined);
 
     // If any field provided, let normal handler proceed
@@ -409,16 +409,14 @@ async function handleUserBanToggleOrSet(req, res) {
       return res.status(400).json({ error: 'cannot ban yourself' });
     }
 
-    // FIX: 'ban' key ko 'banned' ke alias ke taur par check karein
-    const explicitProvided = (req.body?.banned !== undefined) || (req.query?.banned !== undefined) || (req.body?.ban !== undefined) || (req.query?.ban !== undefined);
+    const explicitProvided = (req.body?.banned !== undefined) || (req.query?.banned !== undefined);
     const isId = /^\d+$/.test(idOrUsername);
     const where = isId ? 'id=$1' : 'username=$1';
     const vals = [isId ? Number(idOrUsername) : idOrUsername];
 
     let sql, params;
     if (explicitProvided) {
-      // FIX: 'ban' alias se value lein agar 'banned' maujood nahi hai
-      const banned = toBool(req.body?.banned ?? req.query?.banned ?? req.body?.ban ?? req.query?.ban);
+      const banned = toBool(req.body?.banned ?? req.query?.banned);
       sql = `UPDATE users SET banned=$2 WHERE ${where} RETURNING id, username, role, banned`;
       params = [...vals, banned];
     } else {
@@ -435,23 +433,10 @@ async function handleUserBanToggleOrSet(req, res) {
   }
 }
 
-// Body-based: { id/userId/username } + optional { banned/ban }
+// Body-based: { id } ya { username } + optional { banned }
 async function handleUserBanBody(req, res) {
-  // 1. Find ID using aliases: id, userId, username
-  const id = req.body?.id || req.query?.id || req.body?.userId || req.query?.userId || req.body?.username || req.query?.username;
-  if (!id) return res.status(400).json({ error: 'id, userId, or username required' });
-
-  // 2. Find 'ban' alias and copy to 'banned' if 'banned' isn't set
-  // Ensure req.body exists
-  req.body = req.body || {};
-  if (req.body.banned === undefined) {
-    const banAlias = req.body?.ban ?? req.query?.ban;
-    if (banAlias !== undefined) {
-      req.body.banned = banAlias;
-    }
-  }
-
-  // 3. Set req.params.id for handleUserBanToggleOrSet to use
+  const id = req.body?.id || req.query?.id || req.body?.username || req.query?.username;
+  if (!id) return res.status(400).json({ error: 'id or username required' });
   req.params = req.params || {};
   req.params.id = String(id);
   return handleUserBanToggleOrSet(req, res);
@@ -481,9 +466,6 @@ app.patch('/admin/users/:id', authRole(BAN_ROLES), async (req, res) => {
 
     const fields = []; const vals = []; let idx = 1;
     if (req.body?.banned !== undefined) { fields.push(`banned = $${idx++}`); vals.push(toBool(req.body.banned)); }
-    // PATCH ko bhi 'ban' alias check karne dein
-    else if (req.body?.ban !== undefined) { fields.push(`banned = $${idx++}`); vals.push(toBool(req.body.ban)); }
-
     if (!fields.length) return res.status(400).json({ error: 'no fields to update' });
 
     const isId = /^\d+$/.test(idOrUsername);
@@ -782,7 +764,7 @@ app.post('/api/expenses/submit', authRole(['user','admin','mainadmin']), async (
       pushNotification(e.submittedBy, {
         type: 'expenseSubmit',
         title: 'Expense submitted',
-        body: `${e.category}    ${e.amount} (pending approval)`,
+        body: `${e.category}   ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¹${e.amount} (pending approval)`,
         data: { id: e.id, category: e.category, amount: e.amount, approved: false },
       });
     }
@@ -809,8 +791,8 @@ app.post('/api/expenses', authRole(['admin','mainadmin']), async (req, res) => {
       `INSERT INTO expenses (amount, category, description, paid_to, date, created_at, updated_at, enabled, approved, status, submitted_by, submitted_by_id, approved_by, approved_by_id, approved_at)
        VALUES ($1,$2,$3,$4,$5,$6,$6,true,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
       [amt, cat, (description||'').trim(), (paidTo||'').trim(), date ? new Date(date) : now, now,
-        approve, (approve ? 'approved' : 'pending'), req.user?.username || null, req.user?.id || null,
-        approve ? req.user?.username : null, approve ? req.user?.id : null, approve ? now : null]
+       approve, (approve ? 'approved' : 'pending'), req.user?.username || null, req.user?.id || null,
+       approve ? req.user?.username : null, approve ? req.user?.id : null, approve ? now : null]
     );
     res.status(201).json({ message: 'Expense created', expense: rowToExpense(rows[0]) });
   } catch (err) {
@@ -899,7 +881,7 @@ app.post('/admin/expenses/:id/approve', authRole(['admin','mainadmin']), async (
       pushNotification(who, {
         type: `expense${approve ? 'Approval' : 'Pending'}`,
         title: `Expense ${approve ? 'approved' : 'set to pending'}`,
-        body: `${e.category}    ${e.amount}`,
+        body: `${e.category}   ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¹${e.amount}`,
         data: { id: e.id, category: e.category, approved: approve },
       });
     }
@@ -985,7 +967,7 @@ async function createDonationHandler(req, res) {
        VALUES ($1,$2,$3,$4,$5,$6,$7,false,'pending',now(),now(),$8,$9,$10)
        RETURNING *`,
       [req.user.id, req.user.username, String(donorName).trim(), Number(amount), paymentMethod, category,
-        cashReceiverName || null, screenshotPublicId, screenshotUrl, code]
+       cashReceiverName || null, screenshotPublicId, screenshotUrl, code]
     );
     res.status(201).json({ message: 'Donation submitted', donation: rowToDonation(rows[0]) });
   } catch (err) {
@@ -1028,9 +1010,9 @@ app.get('/api/donations/donations', authRole(['user','admin','mainadmin']), asyn
     let vals = [];
     if (q) {
       sql += ` WHERE lower(coalesce(donor_name,'')) ILIKE lower($1)
-             OR lower(coalesce(donor_username,'')) ILIKE lower($1)
-             OR lower(coalesce(receipt_code,'')) ILIKE lower($1)
-             OR lower(coalesce(category,'')) ILIKE lower($1)`;
+            OR lower(coalesce(donor_username,'')) ILIKE lower($1)
+            OR lower(coalesce(receipt_code,'')) ILIKE lower($1)
+            OR lower(coalesce(category,'')) ILIKE lower($1)`;
       vals = [`%${q}%`];
     }
     sql += ' ORDER BY created_at DESC';
@@ -1045,8 +1027,8 @@ app.get('/api/donations/donations', authRole(['user','admin','mainadmin']), asyn
   else if (status === 'approved') where += ' AND approved = true';
   if (q) {
     where += ` AND (lower(coalesce(donor_name,'')) ILIKE lower($2)
-                 OR lower(coalesce(receipt_code,'')) ILIKE lower($2)
-                 OR lower(coalesce(category,'')) ILIKE lower($2))`;
+                OR lower(coalesce(receipt_code,'')) ILIKE lower($2)
+                OR lower(coalesce(category,'')) ILIKE lower($2))`;
     vals.push(`%${q}%`);
   }
   const sql = 'SELECT * FROM donations' + where + ' ORDER BY created_at DESC';
@@ -1062,9 +1044,9 @@ app.get('/api/donations/all-donations', authRole(['admin', 'mainadmin']), async 
   let vals = [];
   if (q) {
     sql += ` WHERE lower(coalesce(donor_name,'')) ILIKE lower($1)
-           OR lower(coalesce(donor_username,'')) ILIKE lower($1)
-           OR lower(coalesce(receipt_code,'')) ILIKE lower($1)
-           OR lower(coalesce(category,'')) ILIKE lower($1)`;
+          OR lower(coalesce(donor_username,'')) ILIKE lower($1)
+          OR lower(coalesce(receipt_code,'')) ILIKE lower($1)
+          OR lower(coalesce(category,'')) ILIKE lower($1)`;
     vals = [`%${q}%`];
   }
   sql += ' ORDER BY created_at DESC';
@@ -1084,9 +1066,9 @@ app.get('/api/donations/search', authRole(['user','admin','mainadmin']), async (
     if (isAdmin) {
       sql = `SELECT * FROM donations
              WHERE lower(coalesce(donor_name,'')) ILIKE lower($1)
-               OR lower(coalesce(donor_username,'')) ILIKE lower($1)
-               OR lower(coalesce(receipt_code,'')) ILIKE lower($1)
-               OR lower(coalesce(category,'')) ILIKE lower($1)
+                OR lower(coalesce(donor_username,'')) ILIKE lower($1)
+                OR lower(coalesce(receipt_code,'')) ILIKE lower($1)
+                OR lower(coalesce(category,'')) ILIKE lower($1)
              ORDER BY created_at DESC LIMIT 100`;
       vals = [like];
     } else {
@@ -1143,9 +1125,9 @@ app.post('/admin/donations/:id/approve', authRole(['admin', 'mainadmin']), async
 
     const { rows: upd } = await pool.query(
       `UPDATE donations SET
-        approved=true, status='approved',
-        approved_by=$1, approved_by_id=$2, approved_by_role=$3, approved_by_name=$4, approved_at=now(),
-        receipt_code=$5, updated_at=now()
+         approved=true, status='approved',
+         approved_by=$1, approved_by_id=$2, approved_by_role=$3, approved_by_name=$4, approved_at=now(),
+         receipt_code=$5, updated_at=now()
        WHERE id=$6
        RETURNING *`,
       [req.user.username, req.user.id, req.user.role, approvedByName, rc, id]
@@ -1159,7 +1141,7 @@ app.post('/admin/donations/:id/approve', authRole(['admin', 'mainadmin']), async
         pushNotification(donorUser, {
           type: 'donationApproval',
           title: 'Donation approved',
-          body: `Receipt: ${rcOut || 'N/A'}    Event: ${out.category}    Amount: ${pgNum(out.amount)}`,
+          body: `Receipt: ${rcOut || 'N/A'}   Event: ${out.category}   Amount: ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¹${pgNum(out.amount)}`,
           data: { receiptCode: rcOut || null, category: out.category, amount: out.amount, paymentMethod: out.paymentMethod, approved: true },
         });
       }
@@ -1499,7 +1481,7 @@ app.post('/gallery/folders/:slug/reorder', authRole(['admin', 'mainadmin']), asy
   }
 });
 
-// Rename folder (create new row, move images, delete old
+// Rename folder (create new row, move images, delete old ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â safe without ON UPDATE CASCADE)
 app.post('/gallery/folders/:slug/rename', authRole(['admin', 'mainadmin']), async (req, res) => {
   try {
     await ensureGalleryTables();
@@ -2307,7 +2289,7 @@ app.post('/api/admin/categories/enable', authRole(['admin','mainadmin']), async 
     const enabledRaw = req.body.enabled;
     const enabled = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
     const { rows } = await pool.query('UPDATE categories SET enabled=$1 WHERE id=$2 RETURNING id,name,enabled,created_at', [enabled, id]);
-    if (!rows.length) return res.status(44).json({ error: 'category not found' });
+    if (!rows.length) return res.status(404).json({ error: 'category not found' });
     res.json({ ok:true, category: rowToCategory(rows[0]) });
   } catch(e){ console.error('categories alias enable error:', e); res.status(500).send('Failed to update category'); }
 });
@@ -2342,7 +2324,7 @@ app.post('/api/admin/categories/delete', authRole(['admin','mainadmin']), async 
 });
 /* ===================== End: Categories mgmt ===================== */
 /* ===== Categories mgmt: enable/rename/delete with broad aliases ===== */
-// function rowToCategory(r){ return { id:r.id, name:r.name, enabled:r.enabled, createdAt:r.created_at }; } // Already defined above
+function rowToCategory(r){ return { id:r.id, name:r.name, enabled:r.enabled, createdAt:r.created_at }; }
 
 async function catEnableHandler(req, res) {
   try {
@@ -2401,7 +2383,7 @@ async function catDeleteHandler(req, res) {
 // REST-style params too
 app.post('/api/categories/:id/enable', authRole(['admin','mainadmin']), catEnableHandler);
 app.post('/api/categories/:id/rename', authRole(['admin','mainadmin']), catRenameHandler);
-// app.delete('/api/categories/:id', authRole(['admin','mainadmin']), catDeleteHandler); // Already defined above
+app.delete('/api/categories/:id', authRole(['admin','mainadmin']), catDeleteHandler);
 // Extra admin REST deletes
 app.delete('/api/admin/categories/:id', authRole(['admin','mainadmin']), catDeleteHandler);
 app.delete('/admin/categories/:id', authRole(['admin','mainadmin']), catDeleteHandler);
@@ -2448,9 +2430,9 @@ async function updateCategoryByIdHandler(req, res) {
 async function catAdminPutHandler(req, res) {
   try {
     const hasName = (typeof req.body?.name === 'string' && req.body.name.trim())
-                  || (typeof req.body?.newName === 'string' && req.body.newName.trim())
-                  || (typeof req.query?.name === 'string' && req.query.name.trim())
-                  || (typeof req.query?.newName === 'string' && req.query.newName.trim());
+                 || (typeof req.body?.newName === 'string' && req.body.newName.trim())
+                 || (typeof req.query?.name === 'string' && req.query.name.trim())
+                 || (typeof req.query?.newName === 'string' && req.query.newName.trim());
     const hasEnabled = (req.body?.enabled !== undefined) || (req.query?.enabled !== undefined);
 
     // If explicit fields provided, delegate to the normal updater
@@ -2475,9 +2457,9 @@ async function catAdminPutHandler(req, res) {
 app.put('/api/admin/categories/:id', authRole(['admin','mainadmin']), async function adminPreToggleNoBody(req, res, next) {
   try {
     const hasName = (typeof req.body?.name === 'string' && req.body.name.trim())
-                  || (typeof req.body?.newName === 'string' && req.body.newName.trim())
-                  || (typeof req.query?.name === 'string' && req.query.name.trim())
-                  || (typeof req.query?.newName === 'string' && req.query.newName.trim());
+                 || (typeof req.body?.newName === 'string' && req.body.newName.trim())
+                 || (typeof req.query?.name === 'string' && req.query.name.trim())
+                 || (typeof req.query?.newName === 'string' && req.query.newName.trim());
     const hasEnabled = (req.body?.enabled !== undefined) || (req.query?.enabled !== undefined);
 
     if (hasName || hasEnabled) return next('route'); // let the next route handle explicit updates
@@ -2537,8 +2519,7 @@ async function catToggleHandler(req, res) {
     const id = req.params?.id;
     if (!id) return res.status(400).json({ error: 'id required' });
     const { rows } = await pool.query(
-      // FIX: Yahaan 'id=' ki jagah 'id=$1' hona chahiye tha
-      'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at',
+      'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id= RETURNING id,name,enabled,created_at',
       [id]
     );
     if (!rows.length) return res.status(404).json({ error: 'category not found' });
