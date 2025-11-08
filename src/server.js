@@ -396,6 +396,25 @@ app.get('/admin/users', authRole(['admin','mainadmin']), async (req, res) => {
 /* ===== Admin: Ban/Unban Users ===== */
 function toBool(x) { return x === true || x === 'true' || x === 1 || x === '1'; }
 
+// Validator/Parser: UserBanBody – accepts "userId" and "ban" (with aliases id/username and banned)
+const UserBanBody = {
+  parse(req) {
+    const id =
+      req.body?.id ?? req.query?.id ??
+      req.body?.userId ?? req.query?.userId ??
+      req.body?.username ?? req.query?.username;
+    if (id === undefined || id === null || String(id).trim() === '') {
+      throw new Error('id, userId, or username required');
+    }
+    const banRaw =
+      req.body?.ban ?? req.query?.ban ??
+      req.body?.banned ?? req.query?.banned;
+    const bannedProvided = (banRaw !== undefined);
+    const banned = bannedProvided ? toBool(banRaw) : undefined;
+    return { id: String(id).trim(), bannedProvided, banned };
+  }
+};
+
 // Core: Toggle ya explicit set banned by id OR username (path :id can be numeric id or username)
 async function handleUserBanToggleOrSet(req, res) {
   try {
@@ -437,24 +456,18 @@ async function handleUserBanToggleOrSet(req, res) {
 
 // Body-based: { id/userId/username } + optional { banned/ban }
 async function handleUserBanBody(req, res) {
-  // 1. Find ID using aliases: id, userId, username
-  const id = req.body?.id || req.query?.id || req.body?.userId || req.query?.userId || req.body?.username || req.query?.username;
-  if (!id) return res.status(400).json({ error: 'id, userId, or username required' });
-
-  // 2. Find 'ban' alias and copy to 'banned' if 'banned' isn't set
-  // Ensure req.body exists
-  req.body = req.body || {};
-  if (req.body.banned === undefined) {
-    const banAlias = req.body?.ban ?? req.query?.ban;
-    if (banAlias !== undefined) {
-      req.body.banned = banAlias;
+  try {
+    const parsed = UserBanBody.parse(req); // userId + ban accepted here
+    req.body = req.body || {};
+    if (parsed.bannedProvided) {
+      req.body.banned = parsed.banned;
     }
+    req.params = req.params || {};
+    req.params.id = parsed.id;
+    return handleUserBanToggleOrSet(req, res);
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
   }
-
-  // 3. Set req.params.id for handleUserBanToggleOrSet to use
-  req.params = req.params || {};
-  req.params.id = String(id);
-  return handleUserBanToggleOrSet(req, res);
 }
 
 // Kaun kar sakta: admin + mainadmin (zarurat ho to sirf mainadmin rakho)
