@@ -1,4 +1,4 @@
-/* --- server.js (Cleaned & fixed) --- */
+/* --- server.js (Cleaned & fixed with admin delete alias) --- */
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -16,39 +16,6 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
-/* ===== MW: Admin PUT no-body toggle for /api/admin/categories/:id ===== */
-app.use(async function adminCatsPutToggleMw(req, res, next) {
-  try {
-    if (req.method !== 'PUT') return next();
-    // Only match: /api/admin/categories/:id (exact, no suffix path)
-    const m = req.path && req.path.match(/^\/api\/admin\/categories\/(\d+)$/i);
-    if (!m) return next();
-
-    const hasName = (typeof req.body?.name === 'string' && req.body.name.trim())
-                  || (typeof req.body?.newName === 'string' && req.body.newName.trim())
-                  || (typeof req.query?.name === 'string' && req.query.name.trim())
-                  || (typeof req.query?.newName === 'string' && req.query.newName.trim());
-    const hasEnabled = (req.body?.enabled !== undefined) || (req.query?.enabled !== undefined);
-
-    // If any field provided, let normal handler proceed
-    if (hasName || hasEnabled) return next();
-
-    await ensureCategoriesTable();
-    const id = m[1];
-    const { rows } = await pool.query(
-      'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at',
-      [id]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'category not found' });
-
-    const r = rows[0];
-    return res.json({ ok: true, toggled: true, category: { id: r.id, name: r.name, enabled: r.enabled, createdAt: r.created_at } });
-  } catch (e) {
-    console.error('admin PUT toggle mw error:', e);
-    return res.status(500).send('Category toggle failed');
-  }
-});
-
 
 // Request log
 app.use((req, res, next) => {
@@ -352,7 +319,7 @@ app.post('/auth/login', async (req, res) => {
   if (!user) return res.status(400).send('User not found');
   if (user.banned) return res.status(403).send('User banned');
   const validPass = await bcrypt.compare(password, user.passwordHash);
-  if (!validPass) return res.status(400).send('Invalid password');
+  if (!validPass) return res.status(400).json({ error: 'Invalid password' });
 
   user.loggedIn = deviceId; await saveUsers(users);
   const cleanRole = normRole(user.role || 'user');
@@ -423,12 +390,10 @@ async function handleUserBanToggleOrSet(req, res) {
     const idOrUsername = String(req.params.id || '').trim();
     if (!idOrUsername) return res.status(400).json({ error: 'id or username required' });
 
-    // Safety: khud ko ban/unban mat karo (optional)
     if (String(req.user.id) === idOrUsername || String(req.user.username) === idOrUsername) {
       return res.status(400).json({ error: 'cannot ban yourself' });
     }
 
-    // FIX: 'ban' key ko 'banned' ke alias ke taur par check karein
     const explicitProvided = (req.body?.banned !== undefined) || (req.query?.banned !== undefined) || (req.body?.ban !== undefined) || (req.query?.ban !== undefined);
     const isId = /^\d+$/.test(idOrUsername);
     const where = isId ? 'id=$1' : 'username=$1';
@@ -436,7 +401,6 @@ async function handleUserBanToggleOrSet(req, res) {
 
     let sql, params;
     if (explicitProvided) {
-      // FIX: 'ban' alias se value lein agar 'banned' maujood nahi hai
       const banned = toBool(req.body?.banned ?? req.query?.banned ?? req.body?.ban ?? req.query?.ban);
       sql = `UPDATE users SET banned=$2 WHERE ${where} RETURNING id, username, role, banned`;
       params = [...vals, banned];
@@ -454,10 +418,9 @@ async function handleUserBanToggleOrSet(req, res) {
   }
 }
 
-// Body-based: { id/userId/username } + optional { banned/ban }
 async function handleUserBanBody(req, res) {
   try {
-    const parsed = UserBanBody.parse(req); // userId + ban accepted here
+    const parsed = UserBanBody.parse(req);
     req.body = req.body || {};
     if (parsed.bannedProvided) {
       req.body.banned = parsed.banned;
@@ -470,22 +433,13 @@ async function handleUserBanBody(req, res) {
   }
 }
 
-// Kaun kar sakta: admin + mainadmin (zarurat ho to sirf mainadmin rakho)
 const BAN_ROLES = ['admin','mainadmin'];
-
-// REST-style: id/username as :id
 app.post('/admin/users/:id/ban', authRole(BAN_ROLES), handleUserBanToggleOrSet);
 app.post('/api/admin/users/:id/ban', authRole(BAN_ROLES), handleUserBanToggleOrSet);
-
-// Body-based aliases (Admin app me id/username body me bhejna easy hota hai)
 app.post('/admin/users/ban', authRole(BAN_ROLES), handleUserBanBody);
 app.post('/api/admin/users/ban', authRole(BAN_ROLES), handleUserBanBody);
-
-// Optional: direct unban endpoints (force false)
 app.post('/admin/users/:id/unban', authRole(BAN_ROLES), (req,res)=>{ req.body=req.body||{}; req.body.banned=false; handleUserBanToggleOrSet(req,res); });
 app.post('/api/admin/users/:id/unban', authRole(BAN_ROLES), (req,res)=>{ req.body=req.body||{}; req.body.banned=false; handleUserBanToggleOrSet(req,res); });
-
-// Optional: PATCH generic user update (abhi sirf banned)
 app.patch('/admin/users/:id', authRole(BAN_ROLES), async (req, res) => {
   try {
     await ensureUsersTable();
@@ -494,7 +448,6 @@ app.patch('/admin/users/:id', authRole(BAN_ROLES), async (req, res) => {
 
     const fields = []; const vals = []; let idx = 1;
     if (req.body?.banned !== undefined) { fields.push(`banned = $${idx++}`); vals.push(toBool(req.body.banned)); }
-    // PATCH ko bhi 'ban' alias check karne dein
     else if (req.body?.ban !== undefined) { fields.push(`banned = $${idx++}`); vals.push(toBool(req.body.ban)); }
 
     if (!fields.length) return res.status(400).json({ error: 'no fields to update' });
@@ -513,12 +466,8 @@ app.patch('/admin/users/:id', authRole(BAN_ROLES), async (req, res) => {
     res.status(500).json({ error: 'Failed to update user' });
   }
 });
-
-// Aliases for frontend calling /admin/ban-user
 app.post('/admin/ban-user', authRole(BAN_ROLES), handleUserBanBody);
 app.post('/api/admin/ban-user', authRole(BAN_ROLES), handleUserBanBody);
-
-// Optional: param-based alias too
 app.post('/admin/ban-user/:id', authRole(BAN_ROLES), handleUserBanToggleOrSet);
 app.post('/api/admin/ban-user/:id', authRole(BAN_ROLES), handleUserBanToggleOrSet);
 
@@ -661,6 +610,11 @@ async function ensureCategoriesTable() {
 }
 
 /* ===================== Categories (DB) + FE aliases ===================== */
+function rowToCategory(r) {
+  const enabled = r.enabled === true; // normalize boolean
+  return { id: r.id, name: r.name, enabled, isEnabled: enabled, createdAt: r.created_at };
+}
+
 const listCategoriesHandler = async (req, res) => {
   try {
     await ensureCategoriesTable();
@@ -672,12 +626,14 @@ const listCategoriesHandler = async (req, res) => {
     if (!isAdmin && !includeDisabled) sql += ' WHERE enabled = true';
     sql += ' ORDER BY lower(name) ASC';
     const { rows } = await pool.query(sql);
-    res.json(rows);
+    res.set('Cache-Control','no-store');
+    res.json(rows.map(rowToCategory));
   } catch (e) {
     console.error('categories list error:', e);
     res.status(500).send('Failed to list categories');
   }
 };
+
 const createCategoryHandler = async (req, res) => {
   try {
     await ensureCategoriesTable();
@@ -685,23 +641,207 @@ const createCategoryHandler = async (req, res) => {
     const nm = (req.body?.name ?? '').toString().trim();
     if (!nm) return res.status(400).json({ error: 'name required' });
 
-    // Use DB default for enabled (DEFAULT TRUE), and handle duplicates cleanly
     const { rows } = await pool.query(
       'INSERT INTO categories(name, enabled) VALUES ($1, TRUE) ON CONFLICT (name) DO NOTHING RETURNING id, name, enabled, created_at',
       [nm]
     );
     if (!rows.length) return res.status(409).json({ error: 'category already exists' });
-    return res.status(201).json(rows[0]);
+    return res.status(201).json(rowToCategory(rows[0]));
   } catch (e) {
     console.error('categories create error:', e);
     return res.status(500).json({ error: 'Create failed', code: e.code || null, detail: e.message || String(e) });
   }
 };
+
 app.get('/api/categories', authRole(['user','admin','mainadmin']), listCategoriesHandler);
-app.post('/api/categories', authRole(['admin','mainadmin']), createCategoryHandler);
-// FE aliases
 app.get('/api/categories/list', authRole(['user','admin','mainadmin']), listCategoriesHandler);
+app.post('/api/categories', authRole(['admin','mainadmin']), createCategoryHandler);
 app.post('/api/admin/categories', authRole(['admin','mainadmin']), createCategoryHandler);
+
+// Enable/Disable by param id (explicit set or toggle if missing)
+app.post('/api/categories/:id/enable', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureCategoriesTable();
+    const id = req.params.id;
+    const enabledRaw = (req.body?.enabled ?? req.body?.isEnabled ?? req.query?.enabled ?? req.query?.isEnabled);
+
+    if (enabledRaw === undefined) {
+      const { rows } = await pool.query(
+        'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at',
+        [id]
+      );
+      if (!rows.length) return res.status(404).json({ error: 'category not found' });
+      return res.json({ ok: true, toggled: true, category: rowToCategory(rows[0]) });
+    }
+
+    const enabled = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
+    const { rows } = await pool.query('UPDATE categories SET enabled=$1 WHERE id=$2 RETURNING id,name,enabled,created_at', [enabled, id]);
+    if (!rows.length) return res.status(404).json({ error: 'category not found' });
+    res.json({ ok: true, category: rowToCategory(rows[0]) });
+  } catch (e) {
+    console.error('categories enable error:', e);
+    res.status(500).send('Failed to update category');
+  }
+});
+
+// Rename by param id
+app.post('/api/categories/:id/rename', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureCategoriesTable();
+    const id = req.params.id;
+    const desired = String((req.body?.name || req.body?.newName || '')).trim();
+    if (!desired) return res.status(400).json({ error: 'name (or newName) required' });
+    const { rows } = await pool.query('UPDATE categories SET name=$1 WHERE id=$2 RETURNING id,name,enabled,created_at', [desired, id]);
+    if (!rows.length) return res.status(404).json({ error: 'category not found' });
+    res.json({ ok:true, category: rowToCategory(rows[0]) });
+  } catch(e){
+    if ((e.code||'').startsWith('23')) return res.status(409).json({ error: 'category already exists' });
+    console.error('categories rename error:', e); res.status(500).send('Failed to rename category');
+  }
+});
+
+// Delete by param id
+app.delete('/api/categories/:id', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureCategoriesTable();
+    const id = req.params.id;
+    const { rows } = await pool.query('DELETE FROM categories WHERE id=$1 RETURNING id,name,enabled,created_at', [id]);
+    if (!rows.length) return res.status(404).json({ error: 'category not found' });
+    res.json({ ok:true, category: rowToCategory(rows[0]) });
+  } catch(e){ console.error('categories delete error:', e); res.status(500).send('Failed to delete category'); }
+});
+
+// MISSING ALIAS: Delete by param id (admin path)
+app.delete('/api/admin/categories/:id', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureCategoriesTable();
+    const { id } = req.params;
+    const { rows } = await pool.query('DELETE FROM categories WHERE id=$1 RETURNING id,name,enabled,created_at', [id]);
+    if (!rows.length) return res.status(404).json({ error: 'category not found' });
+    res.json({ ok:true, category: rowToCategory(rows[0]) });
+  } catch(e){ console.error('categories admin delete alias error:', e); res.status(500).send('Failed to delete category'); }
+});
+
+// Admin FE aliases (body.id based)
+app.post('/api/admin/categories/enable', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureCategoriesTable();
+    const id = req.body?.id;
+    if (!id) return res.status(400).json({ error: 'id required' });
+    const enabledRaw = (req.body?.enabled ?? req.body?.isEnabled);
+    const enabled = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
+    const { rows } = await pool.query('UPDATE categories SET enabled=$1 WHERE id=$2 RETURNING id,name,enabled,created_at', [enabled, id]);
+    if (!rows.length) return res.status(404).json({ error: 'category not found' });
+    res.json({ ok:true, category: rowToCategory(rows[0]) });
+  } catch(e){ console.error('categories alias enable error:', e); res.status(500).send('Failed to update category'); }
+});
+app.post('/api/admin/categories/rename', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureCategoriesTable();
+    const id = req.body?.id;
+    const desired = String((req.body?.name || req.body?.newName || '')).trim();
+    if (!id) return res.status(400).json({ error: 'id required' });
+    if (!desired) return res.status(400).json({ error: 'name (or newName) required' });
+    const { rows } = await pool.query('UPDATE categories SET name=$1 WHERE id=$2 RETURNING id,name,enabled,created_at', [desired, id]);
+    if (!rows.length) return res.status(404).json({ error: 'category not found' });
+    res.json({ ok:true, category: rowToCategory(rows[0]) });
+  } catch(e){
+    if ((e.code||'').startsWith('23')) return res.status(409).json({ error: 'category already exists' });
+    console.error('categories alias rename error:', e); res.status(500).send('Failed to rename category');
+  }
+});
+
+// REST-style update (PUT/PATCH /.../categories/:id)
+async function updateCategoryByIdHandler(req, res) {
+  try {
+    await ensureCategoriesTable();
+
+    const id = req.params.id;
+    if (!id) return res.status(400).json({ error: 'id required' });
+
+    const nameIn = (req.body?.name ?? req.body?.newName ?? req.query?.name ?? req.query?.newName);
+    const enabledRaw = (req.body?.enabled ?? req.body?.isEnabled ?? req.query?.enabled ?? req.query?.isEnabled);
+
+    const fields = []; const vals = []; let idx = 1;
+
+    if (nameIn !== undefined) {
+      const nm = String(nameIn).trim();
+      if (!nm) return res.status(400).json({ error: 'name (or newName) required' });
+      fields.push(`name = $${idx++}`); vals.push(nm);
+    }
+    if (enabledRaw !== undefined) {
+      const en = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
+      fields.push(`enabled = $${idx++}`); vals.push(en);
+    }
+
+    if (!fields.length) return res.status(400).json({ error: 'no fields to update' });
+
+    vals.push(id);
+    const sql = `UPDATE categories SET ${fields.join(', ')} WHERE id=$${idx} RETURNING id,name,enabled,created_at`;
+    const { rows } = await pool.query(sql, vals);
+    if (!rows.length) return res.status(404).json({ error: 'category not found' });
+    const r = rows[0];
+    return res.json({ ok: true, category: rowToCategory(r) });
+  } catch (e) {
+    if ((e.code || '').startsWith('23')) return res.status(409).json({ error: 'category already exists' });
+    console.error('categories PUT/PATCH error:', e);
+    res.status(500).send('Category update failed');
+  }
+}
+app.put('/api/admin/categories/:id', authRole(['admin','mainadmin']), updateCategoryByIdHandler);
+app.patch('/api/admin/categories/:id', authRole(['admin','mainadmin']), updateCategoryByIdHandler);
+app.put('/admin/categories/:id', authRole(['admin','mainadmin']), updateCategoryByIdHandler);
+app.patch('/admin/categories/:id', authRole(['admin','mainadmin']), updateCategoryByIdHandler);
+app.put('/api/categories/:id', authRole(['admin','mainadmin']), updateCategoryByIdHandler);
+app.patch('/api/categories/:id', authRole(['admin','mainadmin']), updateCategoryByIdHandler);
+
+// Toggle endpoints
+async function catToggleHandler(req, res) {
+  try {
+    await ensureCategoriesTable();
+    const id = req.params?.id;
+    if (!id) return res.status(400).json({ error: 'id required' });
+    const { rows } = await pool.query(
+      'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at',
+      [id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'category not found' });
+    return res.json({ ok: true, toggled: true, category: rowToCategory(rows[0]) });
+  } catch (e) {
+    console.error('categories toggle error:', e);
+    return res.status(500).send('Toggle failed');
+  }
+}
+app.post('/api/admin/categories/:id/toggle', authRole(['admin','mainadmin']), catToggleHandler);
+app.put('/api/admin/categories/:id/toggle', authRole(['admin','mainadmin']), catToggleHandler);
+app.post('/admin/categories/:id/toggle', authRole(['admin','mainadmin']), catToggleHandler);
+app.post('/api/categories/:id/toggle', authRole(['admin','mainadmin']), catToggleHandler);
+
+// Enabled-only list endpoints
+app.get('/api/categories/enabled', authRole(['user','admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureCategoriesTable();
+    const { rows } = await pool.query('SELECT id, name, enabled, created_at FROM categories WHERE enabled = true ORDER BY lower(name) ASC');
+    res.set('Cache-Control','no-store');
+    res.json(rows.map(rowToCategory));
+  } catch (e) {
+    console.error('categories enabled-list error:', e);
+    res.status(500).send('Failed to list categories');
+  }
+});
+
+// Public (no token) - always enabled only
+app.get('/public/categories', authOptional, async (req, res) => {
+  try {
+    await ensureCategoriesTable();
+    const { rows } = await pool.query('SELECT id, name FROM categories WHERE enabled = true ORDER BY lower(name) ASC');
+    res.json(rows);
+  } catch (e) {
+    console.error('public categories list error:', e);
+    res.status(500).send('Failed to list categories');
+  }
+});
+app.post("/admin/categories/create", authRole(["admin","mainadmin"]), createCategoryHandler);
 
 /* ===================== Expenses (Postgres) ===================== */
 function rowToExpense(r) {
@@ -850,18 +990,7 @@ app.put('/api/expenses/:id', authRole(['admin','mainadmin']), async (req, res) =
     if (body.date) { fields.push(`date = $${idx++}`); vals.push(new Date(body.date)); }
     if (body.enabled !== undefined) { fields.push(`enabled = $${idx++}`); vals.push(!(body.enabled === false || body.enabled === 'false')); }
 
-    if (!fields.length) {
-    try {
-      const { rows: cur } = await pool.query('SELECT id,name,enabled,created_at FROM categories WHERE id=$1', [id]);
-      if (!cur.length) return res.status(404).json({ error: 'category not found' });
-      const { rows } = await pool.query('UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at', [id]);
-      const r = rows[0];
-      return res.json({ ok: true, toggled: true, category: { id: r.id, name: r.name, enabled: r.enabled, createdAt: r.created_at } });
-    } catch (e) {
-      console.error('categories PUT/PATCH toggle error:', e);
-      return res.status(500).send('Category toggle failed');
-    }
-  }
+    if (!fields.length) return res.status(400).json({ error: 'no fields to update' });
 
     fields.push(`updated_at = now()`);
     vals.push(id);
@@ -1012,7 +1141,6 @@ app.post('/api/donations/submit-donation',
   uploadDonation.single('screenshot'),
   createDonationHandler
 );
-// Alias direct to same handler
 app.post('/api/donations/create',
   authRole(['user','admin','mainadmin']),
   uploadDonation.single('screenshot'),
@@ -1051,7 +1179,6 @@ app.get('/api/donations/donations', authRole(['user','admin','mainadmin']), asyn
     return res.json(rows.map(r => redactDonationForRole(rowToDonation(r), role)));
   }
 
-  // mine
   let where = ` WHERE (donor_username = $1 OR donor_name = $1)`;
   const vals = [req.user.username];
   if (status === 'pending') where += ' AND approved = false';
@@ -1139,12 +1266,10 @@ app.post('/admin/donations/:id/approve', authRole(['admin', 'mainadmin']), async
     if (!curRows.length) return res.status(404).json({ error: 'Donation not found' });
     let d = curRows[0];
 
-    // ensure receipt code valid
     let rc = (d.receipt_code || '').toUpperCase();
     const valid = rc.length === 6 && /^[A-Z0-9]{6}$/.test(rc) && /[A-Z]/.test(rc) && /\d/.test(rc);
     if (!valid) rc = await generateUniqueReceiptCodeDB();
 
-    // approver display name
     let approvedByName = req.user.username;
     try {
       const users = await getUsers();
@@ -1224,7 +1349,6 @@ async function handleDonationUpdate(req, res) {
       const rc = body.receiptCode.trim().toUpperCase();
       const valid = rc.length === 6 && /^[A-Z0-9]{6}$/.test(rc) && /[A-Z]/.test(rc) && /\d/.test(rc);
       if (!valid) return res.status(400).json({ error: 'receiptCode must be 6-char A-Z0-9 with at least 1 letter and 1 digit' });
-      // uniqueness
       const { rows: dup } = await pool.query('SELECT 1 FROM donations WHERE upper(receipt_code) = upper($1) AND id <> $2 LIMIT 1', [rc, id]);
       if (dup.length) return res.status(409).json({ error: 'receiptCode already exists' });
       fields.push(`receipt_code = $${idx++}`); vals.push(rc);
@@ -1512,7 +1636,7 @@ app.post('/gallery/folders/:slug/reorder', authRole(['admin', 'mainadmin']), asy
   }
 });
 
-// Rename folder (create new row, move images, delete old
+// Rename folder (create new row, move images, delete old)
 app.post('/gallery/folders/:slug/rename', authRole(['admin', 'mainadmin']), async (req, res) => {
   try {
     await ensureGalleryTables();
@@ -1691,7 +1815,8 @@ app.post('/gallery/folders/:slug/icon', authRole(['admin', 'mainadmin']), async 
 
     if (iconKey && String(iconKey).trim()) {
       const key = String(iconKey).trim();
-      if (!ALLOWED_ICON_KEYS.has(key)) return res.status(400).json({ error: 'Invalid iconKey', allowed: Array.from(ALLOWED_ICON_KEYS) });
+      const allowed = new Set(['temple','event','flower','music','book','home','star','people','calendar','camera','donation','festival']);
+      if (!allowed.has(key)) return res.status(400).json({ error: 'Invalid iconKey', allowed: Array.from(allowed) });
       await pool.query('UPDATE gallery_folders SET icon_public_id=NULL, icon_key=$1 WHERE slug=$2', [key, slug]);
       return res.json({ ok: true, slug, iconFile: null, iconKey: key, iconUrl: null });
     }
@@ -1871,7 +1996,6 @@ app.delete('/ebooks/folders/:slug', authRole(['admin','mainadmin']), async (req,
     await ensureEbooksTables();
     const { slug } = req.params;
 
-    // Optional Cloudinary cleanup
     try {
       const prefix = `setapur/ebooks/${slug}`;
       const { resources } = await cloudinary.search.expression(`folder:${prefix}`).max_results(500).execute();
@@ -2086,7 +2210,6 @@ app.get('/analytics/summary', authRole(['user','admin','mainadmin']), async (req
     await ensureDonationsTable(); await ensureExpensesTable();
     const { rows: dsum } = await pool.query(`SELECT category, COALESCE(SUM(amount),0)::float AS total FROM donations WHERE approved=true GROUP BY category`);
     const { rows: esum } = await pool.query(`SELECT category, COALESCE(SUM(amount),0)::float AS total FROM expenses WHERE approved=true AND enabled=true GROUP BY category`);
-    // simple merged summary by category
     const map = new Map();
     for (const r of dsum) {
       const k = (r.category || '').trim();
@@ -2155,29 +2278,17 @@ try {
 
 try {
   const aiRoutes = require("./routes/ai");
-  // limit to admins to avoid abuse; change to ["user","admin","mainadmin"] if needed
   app.use("/ai", authRole(["admin","mainadmin"]), aiRoutes);
 } catch (e) {
   console.warn('ai routes not mounted:', e.message);
 }
+
 const PORT = parseInt(process.env.PORT || '10000', 10);
 const HOST = '0.0.0.0';
 
-async function migrateCategoriesDefaults() {
-  try {
-    await ensureCategoriesTable();
-
-    await pool.query('ALTER TABLE categories ALTER COLUMN enabled SET DEFAULT TRUE;');
-    await pool.query('UPDATE categories SET enabled = TRUE WHERE enabled IS NULL;');
-    console.log('Categories defaults fixed');
-  } catch (e) {
-    console.warn('Categories default migration skipped:', e.message);
-  }
-}
 async function fixCategoryDefaults() {
   try {
     await ensureCategoriesTable();
-
     await pool.query('ALTER TABLE categories ALTER COLUMN enabled SET DEFAULT TRUE;');
     await pool.query('UPDATE categories SET enabled = TRUE WHERE enabled IS NULL;');
     console.log('Categories defaults fixed');
@@ -2185,6 +2296,7 @@ async function fixCategoryDefaults() {
     console.warn('Categories default migration skipped:', e.message);
   }
 }
+
 async function start() {
   try {
     await ensureUsersTable();
@@ -2195,7 +2307,6 @@ async function start() {
     await ensureCategoriesTable();
     await fixCategoryDefaults();
 
-
     await seedAdmin();
     app.listen(PORT, HOST, () => {
       console.log(`Server listening on http://${HOST}:${PORT}`);
@@ -2205,14 +2316,8 @@ async function start() {
     process.exit(1);
   }
 }
-start();app.get('/debug/version', (req, res) => {
-  try {
-    const fs = require('fs'); const crypto = require('crypto');
-    const txt = fs.readFileSync(__filename, 'utf8');
-    const hash = crypto.createHash('sha1').update(txt).digest('hex');
-    res.json({ file: __filename, lines: txt.split('\n').length, sha1: hash, ts: Date.now() });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
+start();
+
 app.get('/debug/version', (req, res) => {
   try {
     const fs = require('fs'); const crypto = require('crypto');
@@ -2221,6 +2326,7 @@ app.get('/debug/version', (req, res) => {
     res.json({ file: __filename, lines: txt.split('\n').length, sha1: hash, ts: Date.now() });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
 /* --- alias: POST /admin/create-user -> same as POST /admin/users --- */
 app.post('/admin/create-user', authRole(['admin','mainadmin']), async (req, res) => {
   try {
@@ -2246,325 +2352,3 @@ app.post('/admin/create-user', authRole(['admin','mainadmin']), async (req, res)
     res.status(500).json({ error: 'Create user failed' });
   }
 });
-/* ===================== Categories: enable/rename/delete ===================== */
-function rowToCategory(r){ return { id:r.id, name:r.name, enabled:r.enabled, createdAt:r.created_at }; }
-
-// Enable/Disable by param id
-app.post('/api/categories/:id/enable', authRole(['admin','mainadmin']), async (req, res) => {
-  try {
-    await ensureCategoriesTable();
-    const id = req.params.id;
-
-    // Accept enabled from body or query; if missing, TOGGLE
-    const enabledRaw = (req.body?.enabled ?? req.query?.enabled);
-    if (enabledRaw === undefined) {
-      const { rows } = await pool.query(
-        'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at',
-        [id]
-      );
-      if (!rows.length) return res.status(404).json({ error: 'category not found' });
-      return res.json({ ok: true, toggled: true, category: rowToCategory(rows[0]) });
-    }
-
-    const enabled = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
-    const { rows } = await pool.query(
-      'UPDATE categories SET enabled=$1 WHERE id=$2 RETURNING *',
-      [enabled, id]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'category not found' });
-    res.json({ ok: true, category: rowToCategory(rows[0]) });
-  } catch (e) {
-    console.error('categories enable error:', e);
-    res.status(500).send('Failed to update category');
-  }
-});
-
-// Rename by param id
-app.post('/api/categories/:id/rename', authRole(['admin','mainadmin']), async (req, res) => {
-  try {
-    await ensureCategoriesTable();
-
-    const id = req.params.id;
-    const desired = String((req.body?.name || req.body?.newName || '')).trim();
-    if (!desired) return res.status(400).json({ error: 'name (or newName) required' });
-    const { rows } = await pool.query(
-      'UPDATE categories SET name=$1 WHERE id=$2 RETURNING id,name,enabled,created_at', [desired, id]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'category not found' });
-    res.json({ ok:true, category: rowToCategory(rows[0]) });
-  } catch(e){
-    if ((e.code||'').startsWith('23')) return res.status(409).json({ error: 'category already exists' });
-    console.error('categories rename error:', e); res.status(500).send('Failed to rename category');
-  }
-});
-
-// Delete by param id
-app.delete('/api/categories/:id', authRole(['admin','mainadmin']), async (req, res) => {
-  try {
-    await ensureCategoriesTable();
-
-    const id = req.params.id;
-    const { rows } = await pool.query('DELETE FROM categories WHERE id=$1 RETURNING id,name,enabled,created_at', [id]);
-    if (!rows.length) return res.status(404).json({ error: 'category not found' });
-    res.json({ ok:true, category: rowToCategory(rows[0]) });
-  } catch(e){ console.error('categories delete error:', e); res.status(500).send('Failed to delete category'); }
-});
-
-// Admin FE aliases (body.id based)
-app.post('/api/admin/categories/enable', authRole(['admin','mainadmin']), async (req, res) => {
-  try {
-    await ensureCategoriesTable();
-
-    const id = req.body?.id;
-    if (!id) return res.status(400).json({ error: 'id required' });
-    const enabledRaw = req.body.enabled;
-    const enabled = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
-    const { rows } = await pool.query('UPDATE categories SET enabled=$1 WHERE id=$2 RETURNING id,name,enabled,created_at', [enabled, id]);
-    if (!rows.length) return res.status(44).json({ error: 'category not found' });
-    res.json({ ok:true, category: rowToCategory(rows[0]) });
-  } catch(e){ console.error('categories alias enable error:', e); res.status(500).send('Failed to update category'); }
-});
-
-app.post('/api/admin/categories/rename', authRole(['admin','mainadmin']), async (req, res) => {
-  try {
-    await ensureCategoriesTable();
-
-    const id = req.body?.id;
-    const desired = String((req.body?.name || req.body?.newName || '')).trim();
-    if (!id) return res.status(400).json({ error: 'id required' });
-    if (!desired) return res.status(400).json({ error: 'name (or newName) required' });
-    const { rows } = await pool.query('UPDATE categories SET name=$1 WHERE id=$2 RETURNING id,name,enabled,created_at', [desired, id]);
-    if (!rows.length) return res.status(404).json({ error: 'category not found' });
-    res.json({ ok:true, category: rowToCategory(rows[0]) });
-  } catch(e){
-    if ((e.code||'').startsWith('23')) return res.status(409).json({ error: 'category already exists' });
-    console.error('categories alias rename error:', e); res.status(500).send('Failed to rename category');
-  }
-});
-
-app.post('/api/admin/categories/delete', authRole(['admin','mainadmin']), async (req, res) => {
-  try {
-    await ensureCategoriesTable();
-
-    const id = req.body?.id;
-    if (!id) return res.status(400).json({ error: 'id required' });
-    const { rows } = await pool.query('DELETE FROM categories WHERE id=$1 RETURNING id,name,enabled,created_at', [id]);
-    if (!rows.length) return res.status(404).json({ error: 'category not found' });
-    res.json({ ok:true, category: rowToCategory(rows[0]) });
-  } catch(e){ console.error('categories alias delete error:', e); res.status(500).send('Failed to delete category'); }
-});
-/* ===================== End: Categories mgmt ===================== */
-/* ===== Categories mgmt: enable/rename/delete with broad aliases ===== */
-// function rowToCategory(r){ return { id:r.id, name:r.name, enabled:r.enabled, createdAt:r.created_at }; } // Already defined above
-
-async function catEnableHandler(req, res) {
-  try {
-    await ensureCategoriesTable();
-
-    const id = (req.params?.id ?? req.body?.id ?? req.query?.id);
-    if (!id) return res.status(400).json({ error: 'id required' });
-    const enabledRaw = req.body?.enabled ?? req.query?.enabled ?? true;
-    const enabled = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
-    const { rows } = await pool.query('UPDATE categories SET enabled=$1 WHERE id=$2 RETURNING id,name,enabled,created_at', [enabled, id]);
-    if (!rows.length) return res.status(404).json({ error: 'category not found' });
-    res.json({ ok:true, category: rowToCategory(rows[0]) });
-  } catch(e){ console.error('categories enable error:', e); res.status(500).send('Failed to update category'); }
-}
-
-async function catRenameHandler(req, res) {
-  try {
-    await ensureCategoriesTable();
-
-    const id = (req.params?.id ?? req.body?.id ?? req.query?.id);
-    const desired = String((req.body?.name || req.body?.newName || req.query?.name || req.query?.newName || '')).trim();
-    if (!id) return res.status(400).json({ error: 'id required' });
-    if (!desired) return res.status(400).json({ error: 'name (or newName) required' });
-    const { rows } = await pool.query('UPDATE categories SET name=$1 WHERE id=$2 RETURNING id,name,enabled,created_at', [desired, id]);
-    if (!rows.length) return res.status(404).json({ error: 'category not found' });
-    res.json({ ok:true, category: rowToCategory(rows[0]) });
-  } catch(e){
-    if ((e.code||'').startsWith('23')) return res.status(409).json({ error: 'category already exists' });
-    console.error('categories rename error:', e); res.status(500).send('Failed to rename category');
-  }
-}
-
-async function catDeleteHandler(req, res) {
-  try {
-    await ensureCategoriesTable();
-
-    const id = (req.params?.id ?? req.body?.id ?? req.query?.id);
-    if (!id) return res.status(400).json({ error: 'id required' });
-    const { rows } = await pool.query('DELETE FROM categories WHERE id=$1 RETURNING id,name,enabled,created_at', [id]);
-    if (!rows.length) return res.status(404).json({ error: 'category not found' });
-    res.json({ ok:true, category: rowToCategory(rows[0]) });
-  } catch(e){ console.error('categories delete error:', e); res.status(500).send('Failed to delete category'); }
-}
-
-// Aliases: /api/admin, /api, /admin (body/query id)
-['/api/admin/categories/enable','/api/categories/enable','/admin/categories/enable'].forEach(p =>
-  app.post(p, authRole(['admin','mainadmin']), catEnableHandler)
-);
-['/api/admin/categories/rename','/api/categories/rename','/admin/categories/rename'].forEach(p =>
-  app.post(p, authRole(['admin','mainadmin']), catRenameHandler)
-);
-['/api/admin/categories/delete','/api/categories/delete','/admin/categories/delete'].forEach(p =>
-  app.post(p, authRole(['admin','mainadmin']), catDeleteHandler)
-);
-
-// REST-style params too
-app.post('/api/categories/:id/enable', authRole(['admin','mainadmin']), catEnableHandler);
-app.post('/api/categories/:id/rename', authRole(['admin','mainadmin']), catRenameHandler);
-// app.delete('/api/categories/:id', authRole(['admin','mainadmin']), catDeleteHandler); // Already defined above
-// Extra admin REST deletes
-app.delete('/api/admin/categories/:id', authRole(['admin','mainadmin']), catDeleteHandler);
-app.delete('/admin/categories/:id', authRole(['admin','mainadmin']), catDeleteHandler);
-/* ===== Categories REST update (PUT/PATCH /.../categories/:id) ===== */
-async function updateCategoryByIdHandler(req, res) {
-  try {
-    await ensureCategoriesTable();
-
-    const id = req.params.id;
-    if (!id) return res.status(400).json({ error: 'id required' });
-
-    const nameIn = (req.body?.name ?? req.body?.newName ?? req.query?.name ?? req.query?.newName);
-    const enabledRaw = (req.body?.enabled ?? req.query?.enabled);
-
-    const fields = []; const vals = []; let idx = 1;
-
-    if (nameIn !== undefined) {
-      const nm = String(nameIn).trim();
-      if (!nm) return res.status(400).json({ error: 'name (or newName) required' });
-      fields.push(`name = $${idx++}`); vals.push(nm);
-    }
-    if (enabledRaw !== undefined) {
-      const en = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
-      fields.push(`enabled = $${idx++}`); vals.push(en);
-    }
-
-    if (!fields.length) return res.status(400).json({ error: 'no fields to update' });
-
-    vals.push(id);
-    const sql = `UPDATE categories SET ${fields.join(', ')} WHERE id=$${idx} RETURNING id,name,enabled,created_at`;
-    const { rows } = await pool.query(sql, vals);
-    if (!rows.length) return res.status(404).json({ error: 'category not found' });
-    const r = rows[0];
-    return res.json({ ok: true, category: { id: r.id, name: r.name, enabled: r.enabled, createdAt: r.created_at } });
-  } catch (e) {
-    if ((e.code || '').startsWith('23')) return res.status(409).json({ error: 'category already exists' });
-    console.error('categories PUT/PATCH error:', e);
-    res.status(500).send('Category update failed');
-  }
-}
-
-/* ===== Pre-route: admin PUT toggle when no body/params provided ===== */
-
-async function catAdminPutHandler(req, res) {
-  try {
-    const hasName = (typeof req.body?.name === 'string' && req.body.name.trim())
-                  || (typeof req.body?.newName === 'string' && req.body.newName.trim())
-                  || (typeof req.query?.name === 'string' && req.query.name.trim())
-                  || (typeof req.query?.newName === 'string' && req.query.newName.trim());
-    const hasEnabled = (req.body?.enabled !== undefined) || (req.query?.enabled !== undefined);
-
-    // If explicit fields provided, delegate to the normal updater
-    if (hasName || hasEnabled) {
-      return updateCategoryByIdHandler(req, res);
-    }
-
-    // No fields -> TOGGLE
-    await ensureCategoriesTable();
-    const id = req.params.id;
-    const { rows } = await pool.query(
-      'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at',
-      [id]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'category not found' });
-    return res.json({ ok: true, toggled: true, category: rowToCategory(rows[0]) });
-  } catch (e) {
-    console.error('catAdminPutHandler error:', e);
-    return res.status(500).send('Category update failed');
-  }
-}
-app.put('/api/admin/categories/:id', authRole(['admin','mainadmin']), async function adminPreToggleNoBody(req, res, next) {
-  try {
-    const hasName = (typeof req.body?.name === 'string' && req.body.name.trim())
-                  || (typeof req.body?.newName === 'string' && req.body.newName.trim())
-                  || (typeof req.query?.name === 'string' && req.query.name.trim())
-                  || (typeof req.query?.newName === 'string' && req.query.newName.trim());
-    const hasEnabled = (req.body?.enabled !== undefined) || (req.query?.enabled !== undefined);
-
-    if (hasName || hasEnabled) return next('route'); // let the next route handle explicit updates
-
-    await ensureCategoriesTable();
-    const id = req.params.id;
-    const { rows } = await pool.query(
-      'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at',
-      [id]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'category not found' });
-    return res.json({ ok: true, toggled: true, category: rowToCategory(rows[0]) });
-  } catch (e) {
-    console.error('admin pre-toggle error:', e);
-    return res.status(500).send('Category toggle failed');
-  }
-});
-app.put('/api/admin/categories/:id', authRole(['admin','mainadmin']), updateCategoryByIdHandler);
-app.patch('/api/admin/categories/:id', authRole(['admin','mainadmin']), updateCategoryByIdHandler);
-app.put('/admin/categories/:id', authRole(['admin','mainadmin']), updateCategoryByIdHandler);
-app.patch('/admin/categories/:id', authRole(['admin','mainadmin']), updateCategoryByIdHandler);
-app.put('/api/categories/:id', authRole(['admin','mainadmin']), updateCategoryByIdHandler);
-app.patch('/api/categories/:id', authRole(['admin','mainadmin']), updateCategoryByIdHandler);
-/* Categories: enabled-only list endpoints */
-app.get('/api/categories/enabled', authRole(['user','admin','mainadmin']), async (req, res) => {
-  try {
-    await ensureCategoriesTable();
-
-    const { rows } = await pool.query('SELECT id, name, enabled, created_at FROM categories WHERE enabled = true ORDER BY lower(name) ASC');
-    res.json(rows);
-  } catch (e) {
-    console.error('categories enabled-list error:', e);
-    res.status(500).send('Failed to list categories');
-  }
-});
-
-// Public (no token) - always enabled only
-app.get('/public/categories', authOptional, async (req, res) => {
-  try {
-    await ensureCategoriesTable();
-
-    const { rows } = await pool.query('SELECT id, name FROM categories WHERE enabled = true ORDER BY lower(name) ASC');
-    res.json(rows);
-  } catch (e) {
-    console.error('public categories list error:', e);
-    res.status(500).send('Failed to list categories');
-  }
-});
-app.post("/admin/categories/create", authRole(["admin","mainadmin"]), createCategoryHandler);
-
-
-
-// ===== Categories: admin toggle (no body required) =====
-async function catToggleHandler(req, res) {
-  try {
-    await ensureCategoriesTable();
-    const id = req.params?.id;
-    if (!id) return res.status(400).json({ error: 'id required' });
-    const { rows } = await pool.query(
-      // FIX: Yahaan 'id=' ki jagah 'id=$1' hona chahiye tha
-      'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at',
-      [id]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'category not found' });
-    const r = rows[0];
-    return res.json({ ok: true, toggled: true, category: { id: r.id, name: r.name, enabled: r.enabled, createdAt: r.created_at } });
-  } catch (e) {
-    console.error('categories toggle error:', e);
-    return res.status(500).send('Toggle failed');
-  }
-}
-
-// Map to multiple paths (admin-only)
-app.post('/api/admin/categories/:id/toggle', authRole(['admin','mainadmin']), catToggleHandler);
-app.put('/api/admin/categories/:id/toggle', authRole(['admin','mainadmin']), catToggleHandler);
-app.post('/admin/categories/:id/toggle', authRole(['admin','mainadmin']), catToggleHandler);
-app.post('/api/categories/:id/toggle', authRole(['admin','mainadmin']), catToggleHandler);
