@@ -2205,27 +2205,100 @@ app.get('/totals', authRole(['user','admin','mainadmin']), async (req, res) => {
   } catch (err) { console.error(err); res.status(500).send('Totals failed'); }
 });
 
+/* ===================== NEW ANALYTICS SUMMARY ENDPOINT ===================== */
 app.get('/analytics/summary', authRole(['user','admin','mainadmin']), async (req, res) => {
   try {
-    await ensureDonationsTable(); await ensureExpensesTable();
-    const { rows: dsum } = await pool.query(`SELECT category, COALESCE(SUM(amount),0)::float AS total FROM donations WHERE approved=true GROUP BY category`);
-    const { rows: esum } = await pool.query(`SELECT category, COALESCE(SUM(amount),0)::float AS total FROM expenses WHERE approved=true AND enabled=true GROUP BY category`);
-    const map = new Map();
-    for (const r of dsum) {
-      const k = (r.category || '').trim();
-      if (!map.has(k)) map.set(k, { category: k, donationTotal: 0, expenseTotal: 0 });
-      map.get(k).donationTotal += Number(r.total || 0);
+    // 1. Ensure all necessary tables exist
+    if (global.AnalyticsAdmin && global.AnalyticsAdmin.ensure) {
+        await global.AnalyticsAdmin.ensure();
     }
-    for (const r of esum) {
-      const k = (r.category || '').trim();
-      if (!map.has(k)) map.set(k, { category: k, donationTotal: 0, expenseTotal: 0 });
-      map.get(k).expenseTotal += Number(r.total || 0);
-    }
-    const out = Array.from(map.values()).map(x => ({ ...x, balance: (x.donationTotal - x.expenseTotal) }));
-    res.json(out);
-  } catch (e){ console.error('analytics summary error:', e); res.status(500).send('Analytics summary failed'); }
-});
+    await ensureDonationsTable();
+    await ensureExpensesTable();
 
+    // 2. Fetch all ENABLED Folders and Events in order
+    const { rows: folders } = await pool.query(
+      'SELECT id, name FROM analytics_folders WHERE enabled=true ORDER BY order_index ASC, id ASC'
+    );
+    const { rows: eventsCfg } = await pool.query(
+      'SELECT id, folder_id, name, show_donation_detail, show_expense_detail FROM analytics_events WHERE enabled=true ORDER BY order_index ASC, id ASC'
+    );
+
+    // 3. Fetch actual financial data (Approved Donations & Approved+Enabled Expenses)
+    //    Hum raw data layenge taaki detail lists bhi bana sakein
+    const { rows: donations } = await pool.query(
+      `SELECT amount, category, donor_name, date(created_at) as date, receipt_code
+       FROM donations WHERE approved=true ORDER BY created_at DESC`
+    );
+    const { rows: expenses } = await pool.query(
+      `SELECT amount, category, description, date
+       FROM expenses WHERE approved=true AND enabled=true ORDER BY date DESC`
+    );
+
+    // 4. Helper to normalize category names for matching
+    const norm = (s) => String(s || '').trim().toLowerCase();
+
+    // 5. Pre-process data into maps for quick lookup by category name
+    const dataMap = new Map(); // cat -> { donationTotal, expenseTotal, donationsList:[] }
+
+    for (const d of donations) {
+      const cat = norm(d.category);
+      if (!dataMap.has(cat)) dataMap.set(cat, { donationTotal:0, expenseTotal:0, donations:[] });
+      const entry = dataMap.get(cat);
+      entry.donationTotal += Number(d.amount || 0);
+      // Detail sheet ke liye minimal data save karein
+      entry.donations.push({
+        donorName: d.donor_name,
+        amount: Number(d.amount),
+        date: d.date,
+        receiptCode: d.receipt_code
+      });
+    }
+    for (const e of expenses) {
+      const cat = norm(e.category);
+      if (!dataMap.has(cat)) dataMap.set(cat, { donationTotal:0, expenseTotal:0, donations:[] });
+      dataMap.get(cat).expenseTotal += Number(e.amount || 0);
+    }
+
+    // 6. Build the structured response for the User App
+    // Structure: [ { folderName: "X", events: { "EventA": { ...data... } } } ]
+    const response = folders.map(folder => {
+      const folderEvents = {};
+      // Is folder ke events filter karein
+      const myEvents = eventsCfg.filter(e => e.folder_id === folder.id);
+
+      for (const ev of myEvents) {
+        // Event ka naam hi category key hai
+        const catKey = norm(ev.name);
+        const data = dataMap.get(catKey) || { donationTotal: 0, expenseTotal: 0, donations: [] };
+
+        folderEvents[ev.name] = {
+          donationTotal: data.donationTotal,
+          expenseTotal: data.expenseTotal,
+          balance: data.donationTotal - data.expenseTotal,
+          donations: data.donations,
+          config: {
+            showDonationDetail: ev.show_donation_detail,
+            showExpenseDetail: ev.show_expense_detail
+          }
+        };
+      }
+
+      return {
+        folderName: folder.name,
+        events: folderEvents
+      };
+    });
+
+    // (Optional) You could add an "Other" folder here for data that didn't match any configured event.
+
+    // 7. Send final JSON
+    res.json(response);
+
+  } catch (e) {
+    console.error('analytics summary error:', e);
+    res.status(500).send('Analytics summary failed');
+  }
+});
 /* ===================== Debug endpoints ===================== */
 app.get('/debug/donations', async (req, res) => {
   try {
