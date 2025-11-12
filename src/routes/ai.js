@@ -45,6 +45,14 @@ router.post('/chat', async (req, res) => {
 
     const data = await resp.json();
     const text = data?.choices?.[0]?.message?.content ?? '';
+
+    // --- FIX: Check if the text is empty ---
+    if (!text || String(text).trim() === '') {
+      console.error('Empty AI response from Groq:', data); // Log the raw response for debugging
+      return res.status(502).json({ error: 'Empty AI response from provider', raw: data });
+    }
+    // --- END FIX ---
+
     res.json({ provider: AI_PROVIDER, model: payload.model, text, raw: data });
   } catch (e) {
     console.error('ai/chat error:', e);
