@@ -101,6 +101,36 @@ router.delete('/folders/:id', async (req, res) => {
   }
 });
 
+// --- NEW ROUTE: Update folder config (e.g., enable/disable) ---
+router.put('/folders/:id/config', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const body = req.body || {};
+
+    // Helper to safely get boolean or undefined
+    const getBool = (val) => (val === undefined || val === null) ? undefined : (val === true || val === 'true' || val === 1 || val === '1');
+    const enabled = getBool(body.enabled);
+
+    if (enabled === undefined) {
+      return res.status(400).send('enabled field (true/false) is required');
+    }
+
+    const { rows } = await pool.query(
+      'UPDATE analytics_folders SET enabled=$1 WHERE id=$2 RETURNING *',
+      [enabled, id]
+    );
+
+    if (!rows.length) {
+      return res.status(404).send('Folder not found');
+    }
+    res.json(rows[0]); // Return the updated folder object
+  } catch (e) {
+    console.error('PUT /folders/:id/config error:', e);
+    res.status(500).send(e.message);
+  }
+});
+// --- END NEW ROUTE ---
+
 /* ======================= EVENT ROUTES ======================= */
 
 router.post('/folders/:id/events', async (req, res) => {
