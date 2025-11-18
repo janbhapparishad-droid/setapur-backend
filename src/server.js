@@ -2193,18 +2193,63 @@ app.post('/ebooks/files/reorder', authRole(['admin','mainadmin']), async (req, r
   }
 });
 
-/* ===================== Analytics + Totals (DB-based) ===================== */
+// ===================== Analytics-aware Totals (Categories se independent) =====================
 app.get('/totals', authRole(['user','admin','mainadmin']), async (req, res) => {
   try {
-    await ensureDonationsTable(); await ensureExpensesTable();
-    const { rows: d } = await pool.query('SELECT COALESCE(SUM(amount),0) AS total FROM donations WHERE approved = true');
-    const { rows: e } = await pool.query('SELECT COALESCE(SUM(amount),0) AS total FROM expenses WHERE approved = true AND enabled = true');
-    const totalDonation = Number(d[0].total || 0);
-    const totalExpense = Number(e[0].total || 0);
-    res.json({ totalDonation, totalExpense, balance: totalDonation - totalExpense });
-  } catch (err) { console.error(err); res.status(500).send('Totals failed'); }
-});
+    // Ensure tables
+    if (global.AnalyticsAdmin?.ensure) await global.AnalyticsAdmin.ensure();
+    await ensureDonationsTable();
+    await ensureExpensesTable();
 
+    // Helpful index (one-time; ideally move to a migration/startup)
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_analytics_events_name_lower ON analytics_events ((lower(name)));
+    `);
+
+    // Donations: only if category matches an ENABLED analytics_event in an ENABLED folder
+    const dSql = `
+      SELECT COALESCE(SUM(d.amount),0) AS total
+      FROM donations d
+      WHERE d.approved = true
+        AND EXISTS (
+          SELECT 1
+          FROM analytics_events ev
+          JOIN analytics_folders f ON f.id = ev.folder_id
+          WHERE ev.enabled = true
+            AND f.enabled = true
+            AND lower(ev.name) = lower(d.category)
+        )
+    `;
+
+    // Expenses: only if category matches an ENABLED analytics_event in an ENABLED folder
+    const eSql = `
+      SELECT COALESCE(SUM(e.amount),0) AS total
+      FROM expenses e
+      WHERE e.approved = true
+        AND e.enabled = true
+        AND EXISTS (
+          SELECT 1
+          FROM analytics_events ev
+          JOIN analytics_folders f ON f.id = ev.folder_id
+          WHERE ev.enabled = true
+            AND f.enabled = true
+            AND lower(ev.name) = lower(e.category)
+        )
+    `;
+
+    const [{ rows: d }, { rows: e }] = await Promise.all([
+      pool.query(dSql),
+      pool.query(eSql),
+    ]);
+
+    const totalDonation = Number(d[0]?.total || 0);
+    const totalExpense  = Number(e[0]?.total || 0);
+    res.json({ totalDonation, totalExpense, balance: totalDonation - totalExpense });
+  } catch (err) {
+    console.error('totals (analytics-aware) error:', err);
+    res.status(500).send('Totals failed');
+  }
+});
 /* ===================== NEW ANALYTICS SUMMARY ENDPOINT ===================== */
 app.get('/analytics/summary', authRole(['user','admin','mainadmin']), async (req, res) => {
   try {
