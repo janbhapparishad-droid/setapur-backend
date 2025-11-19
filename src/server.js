@@ -1,4 +1,4 @@
-/* --- server.js (Cleaned & fixed with admin delete alias) --- */
+/* --- server.js (Updated: analytics-aware totals + reordering support) --- */
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -205,6 +205,7 @@ function generate6CharAlnumMix() {
   return arr.join('');
 }
 function pgNum(x) { const n = Number(x); return Number.isFinite(n) ? n : 0; }
+function toBool(x) { return x === true || x === 'true' || x === 1 || x === '1'; }
 
 /* ===================== Users (Postgres) ===================== */
 async function ensureUsersTable() {
@@ -361,7 +362,6 @@ app.get('/admin/users', authRole(['admin','mainadmin']), async (req, res) => {
 });
 
 /* ===== Admin: Ban/Unban Users ===== */
-function toBool(x) { return x === true || x === 'true' || x === 1 || x === '1'; }
 
 // Validator/Parser: UserBanBody – accepts "userId" and "ban" (with aliases id/username and banned)
 const UserBanBody = {
@@ -494,7 +494,8 @@ async function ensureExpensesTable() {
       ADD COLUMN IF NOT EXISTS submitted_by_id INT,
       ADD COLUMN IF NOT EXISTS approved_by TEXT,
       ADD COLUMN IF NOT EXISTS approved_by_id INT,
-      ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;
+      ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS order_index INT;
     CREATE INDEX IF NOT EXISTS idx_expenses_cat ON expenses (lower(category));
     CREATE INDEX IF NOT EXISTS idx_expenses_approved_enabled ON expenses (approved, enabled);
   `);
@@ -526,7 +527,8 @@ async function ensureDonationsTable() {
       ADD COLUMN IF NOT EXISTS approved_by_id INT,
       ADD COLUMN IF NOT EXISTS approved_by_role TEXT,
       ADD COLUMN IF NOT EXISTS approved_by_name TEXT,
-      ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;
+      ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS order_index INT;
     CREATE INDEX IF NOT EXISTS idx_donations_cat ON donations (lower(category));
     CREATE INDEX IF NOT EXISTS idx_donations_approved ON donations (approved);
     CREATE INDEX IF NOT EXISTS idx_donations_created ON donations (created_at);
@@ -587,6 +589,8 @@ async function ensureEbooksTables() {
     );
   `);
   await pool.query(`
+    ALTER TABLE ebook_folders
+      ADD COLUMN IF NOT EXISTS order_index INT DEFAULT 0;
     ALTER TABLE ebook_files
       ADD COLUMN IF NOT EXISTS enabled BOOLEAN DEFAULT TRUE,
       ADD COLUMN IF NOT EXISTS order_index INT DEFAULT 0,
@@ -594,6 +598,7 @@ async function ensureEbooksTables() {
       ADD COLUMN IF NOT EXISTS uploaded_at TIMESTAMPTZ DEFAULT now();
     CREATE INDEX IF NOT EXISTS idx_ebook_files_folder ON ebook_files (folder_slug);
     CREATE INDEX IF NOT EXISTS idx_ebook_files_enabled ON ebook_files (enabled);
+    CREATE INDEX IF NOT EXISTS idx_ebook_folders_order ON ebook_folders (order_index, lower(name));
   `);
   console.log('DB ready: ebooks');
 }
@@ -606,13 +611,81 @@ async function ensureCategoriesTable() {
       created_at TIMESTAMPTZ DEFAULT now()
     );
   `);
+  await pool.query(`
+    ALTER TABLE categories
+      ADD COLUMN IF NOT EXISTS order_index INT DEFAULT 0;
+    CREATE INDEX IF NOT EXISTS idx_categories_order ON categories(order_index, lower(name));
+  `);
   console.log('DB ready: categories');
+}
+
+/* ===================== Ordering (ensure + backfill) ===================== */
+async function ensureOrderingColumns() {
+  // All alters are inside ensure* functions already.
+  await ensureCategoriesTable();
+  await ensureDonationsTable();
+  await ensureExpensesTable();
+  await ensureEbooksTables();
+
+  // Helpful indexes for donations/expenses ordering by category+order_index
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_donations_order_cat ON donations (lower(category), order_index, created_at DESC);
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_expenses_order_cat ON expenses (lower(category), order_index, COALESCE(date, created_at) DESC);
+  `);
+}
+
+async function backfillOrderIndexes() {
+  // Categories
+  await pool.query(`
+    WITH x AS (
+      SELECT id, row_number() OVER (ORDER BY order_index ASC, lower(name)) - 1 AS rn
+      FROM categories
+    )
+    UPDATE categories c SET order_index = x.rn FROM x WHERE c.id = x.id;
+  `);
+
+  // Ebook folders
+  await pool.query(`
+    WITH x AS (
+      SELECT slug, row_number() OVER (ORDER BY order_index ASC, lower(name)) - 1 AS rn
+      FROM ebook_folders
+    )
+    UPDATE ebook_folders f SET order_index = x.rn FROM x WHERE f.slug = x.slug;
+  `);
+
+  // Donations per category (newest first becomes higher rn, but we keep rn as position)
+  await pool.query(`
+    WITH x AS (
+      SELECT id,
+             row_number() OVER (
+               PARTITION BY lower(trim(category))
+               ORDER BY order_index ASC NULLS LAST, created_at DESC, id ASC
+             ) - 1 AS rn
+      FROM donations
+    )
+    UPDATE donations d SET order_index = x.rn FROM x WHERE d.id = x.id;
+  `);
+
+  // Expenses per category
+  await pool.query(`
+    WITH x AS (
+      SELECT id,
+             row_number() OVER (
+               PARTITION BY lower(trim(category))
+               ORDER BY order_index ASC NULLS LAST, COALESCE(date, created_at) DESC, id ASC
+             ) - 1 AS rn
+      FROM expenses
+    )
+    UPDATE expenses e SET order_index = x.rn FROM x WHERE e.id = x.id;
+  `);
 }
 
 /* ===================== Categories (DB) + FE aliases ===================== */
 function rowToCategory(r) {
   const enabled = r.enabled === true; // normalize boolean
-  return { id: r.id, name: r.name, enabled, isEnabled: enabled, createdAt: r.created_at };
+  return { id: r.id, name: r.name, enabled, isEnabled: enabled, createdAt: r.created_at, orderIndex: r.order_index ?? 0 };
 }
 
 const listCategoriesHandler = async (req, res) => {
@@ -622,9 +695,9 @@ const listCategoriesHandler = async (req, res) => {
     const role = req.user?.role || 'user';
     const isAdmin = role === 'admin' || role === 'mainadmin';
     const includeDisabled = ['1','true'].includes(String(req.query.includeDisabled || '').toLowerCase());
-    let sql = 'SELECT id, name, enabled, created_at FROM categories';
+    let sql = 'SELECT id, name, enabled, created_at, order_index FROM categories';
     if (!isAdmin && !includeDisabled) sql += ' WHERE enabled = true';
-    sql += ' ORDER BY lower(name) ASC';
+    sql += ' ORDER BY order_index ASC, lower(name) ASC';
     const { rows } = await pool.query(sql);
     res.set('Cache-Control','no-store');
     res.json(rows.map(rowToCategory));
@@ -641,9 +714,13 @@ const createCategoryHandler = async (req, res) => {
     const nm = (req.body?.name ?? '').toString().trim();
     if (!nm) return res.status(400).json({ error: 'name required' });
 
+    // get next order
+    const { rows: r0 } = await pool.query('SELECT COALESCE(MAX(order_index), -1) + 1 AS next FROM categories');
+    const nextOrder = Number(r0[0]?.next || 0);
+
     const { rows } = await pool.query(
-      'INSERT INTO categories(name, enabled) VALUES ($1, TRUE) ON CONFLICT (name) DO NOTHING RETURNING id, name, enabled, created_at',
-      [nm]
+      'INSERT INTO categories(name, enabled, order_index) VALUES ($1, TRUE, $2) ON CONFLICT (name) DO NOTHING RETURNING id, name, enabled, created_at, order_index',
+      [nm, nextOrder]
     );
     if (!rows.length) return res.status(409).json({ error: 'category already exists' });
     return res.status(201).json(rowToCategory(rows[0]));
@@ -667,7 +744,7 @@ app.post('/api/categories/:id/enable', authRole(['admin','mainadmin']), async (r
 
     if (enabledRaw === undefined) {
       const { rows } = await pool.query(
-        'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at',
+        'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at,order_index',
         [id]
       );
       if (!rows.length) return res.status(404).json({ error: 'category not found' });
@@ -675,7 +752,7 @@ app.post('/api/categories/:id/enable', authRole(['admin','mainadmin']), async (r
     }
 
     const enabled = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
-    const { rows } = await pool.query('UPDATE categories SET enabled=$1 WHERE id=$2 RETURNING id,name,enabled,created_at', [enabled, id]);
+    const { rows } = await pool.query('UPDATE categories SET enabled=$1 WHERE id=$2 RETURNING id,name,enabled,created_at,order_index', [enabled, id]);
     if (!rows.length) return res.status(404).json({ error: 'category not found' });
     res.json({ ok: true, category: rowToCategory(rows[0]) });
   } catch (e) {
@@ -691,7 +768,7 @@ app.post('/api/categories/:id/rename', authRole(['admin','mainadmin']), async (r
     const id = req.params.id;
     const desired = String((req.body?.name || req.body?.newName || '')).trim();
     if (!desired) return res.status(400).json({ error: 'name (or newName) required' });
-    const { rows } = await pool.query('UPDATE categories SET name=$1 WHERE id=$2 RETURNING id,name,enabled,created_at', [desired, id]);
+    const { rows } = await pool.query('UPDATE categories SET name=$1 WHERE id=$2 RETURNING id,name,enabled,created_at,order_index', [desired, id]);
     if (!rows.length) return res.status(404).json({ error: 'category not found' });
     res.json({ ok:true, category: rowToCategory(rows[0]) });
   } catch(e){
@@ -705,7 +782,7 @@ app.delete('/api/categories/:id', authRole(['admin','mainadmin']), async (req, r
   try {
     await ensureCategoriesTable();
     const id = req.params.id;
-    const { rows } = await pool.query('DELETE FROM categories WHERE id=$1 RETURNING id,name,enabled,created_at', [id]);
+    const { rows } = await pool.query('DELETE FROM categories WHERE id=$1 RETURNING id,name,enabled,created_at,order_index', [id]);
     if (!rows.length) return res.status(404).json({ error: 'category not found' });
     res.json({ ok:true, category: rowToCategory(rows[0]) });
   } catch(e){ console.error('categories delete error:', e); res.status(500).send('Failed to delete category'); }
@@ -716,7 +793,7 @@ app.delete('/api/admin/categories/:id', authRole(['admin','mainadmin']), async (
   try {
     await ensureCategoriesTable();
     const { id } = req.params;
-    const { rows } = await pool.query('DELETE FROM categories WHERE id=$1 RETURNING id,name,enabled,created_at', [id]);
+    const { rows } = await pool.query('DELETE FROM categories WHERE id=$1 RETURNING id,name,enabled,created_at,order_index', [id]);
     if (!rows.length) return res.status(404).json({ error: 'category not found' });
     res.json({ ok:true, category: rowToCategory(rows[0]) });
   } catch(e){ console.error('categories admin delete alias error:', e); res.status(500).send('Failed to delete category'); }
@@ -730,7 +807,7 @@ app.post('/api/admin/categories/enable', authRole(['admin','mainadmin']), async 
     if (!id) return res.status(400).json({ error: 'id required' });
     const enabledRaw = (req.body?.enabled ?? req.body?.isEnabled);
     const enabled = !(enabledRaw === false || enabledRaw === 'false' || enabledRaw === 0 || enabledRaw === '0');
-    const { rows } = await pool.query('UPDATE categories SET enabled=$1 WHERE id=$2 RETURNING id,name,enabled,created_at', [enabled, id]);
+    const { rows } = await pool.query('UPDATE categories SET enabled=$1 WHERE id=$2 RETURNING id,name,enabled,created_at,order_index', [enabled, id]);
     if (!rows.length) return res.status(404).json({ error: 'category not found' });
     res.json({ ok:true, category: rowToCategory(rows[0]) });
   } catch(e){ console.error('categories alias enable error:', e); res.status(500).send('Failed to update category'); }
@@ -742,7 +819,7 @@ app.post('/api/admin/categories/rename', authRole(['admin','mainadmin']), async 
     const desired = String((req.body?.name || req.body?.newName || '')).trim();
     if (!id) return res.status(400).json({ error: 'id required' });
     if (!desired) return res.status(400).json({ error: 'name (or newName) required' });
-    const { rows } = await pool.query('UPDATE categories SET name=$1 WHERE id=$2 RETURNING id,name,enabled,created_at', [desired, id]);
+    const { rows } = await pool.query('UPDATE categories SET name=$1 WHERE id=$2 RETURNING id,name,enabled,created_at,order_index', [desired, id]);
     if (!rows.length) return res.status(404).json({ error: 'category not found' });
     res.json({ ok:true, category: rowToCategory(rows[0]) });
   } catch(e){
@@ -777,7 +854,7 @@ async function updateCategoryByIdHandler(req, res) {
     if (!fields.length) return res.status(400).json({ error: 'no fields to update' });
 
     vals.push(id);
-    const sql = `UPDATE categories SET ${fields.join(', ')} WHERE id=$${idx} RETURNING id,name,enabled,created_at`;
+    const sql = `UPDATE categories SET ${fields.join(', ')} WHERE id=$${idx} RETURNING id,name,enabled,created_at,order_index`;
     const { rows } = await pool.query(sql, vals);
     if (!rows.length) return res.status(404).json({ error: 'category not found' });
     const r = rows[0];
@@ -802,7 +879,7 @@ async function catToggleHandler(req, res) {
     const id = req.params?.id;
     if (!id) return res.status(400).json({ error: 'id required' });
     const { rows } = await pool.query(
-      'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at',
+      'UPDATE categories SET enabled = NOT coalesce(enabled, TRUE) WHERE id=$1 RETURNING id,name,enabled,created_at,order_index',
       [id]
     );
     if (!rows.length) return res.status(404).json({ error: 'category not found' });
@@ -821,7 +898,7 @@ app.post('/api/categories/:id/toggle', authRole(['admin','mainadmin']), catToggl
 app.get('/api/categories/enabled', authRole(['user','admin','mainadmin']), async (req, res) => {
   try {
     await ensureCategoriesTable();
-    const { rows } = await pool.query('SELECT id, name, enabled, created_at FROM categories WHERE enabled = true ORDER BY lower(name) ASC');
+    const { rows } = await pool.query('SELECT id, name, enabled, created_at, order_index FROM categories WHERE enabled = true ORDER BY order_index ASC, lower(name) ASC');
     res.set('Cache-Control','no-store');
     res.json(rows.map(rowToCategory));
   } catch (e) {
@@ -834,7 +911,7 @@ app.get('/api/categories/enabled', authRole(['user','admin','mainadmin']), async
 app.get('/public/categories', authOptional, async (req, res) => {
   try {
     await ensureCategoriesTable();
-    const { rows } = await pool.query('SELECT id, name FROM categories WHERE enabled = true ORDER BY lower(name) ASC');
+    const { rows } = await pool.query('SELECT id, name FROM categories WHERE enabled = true ORDER BY order_index ASC, lower(name) ASC');
     res.json(rows);
   } catch (e) {
     console.error('public categories list error:', e);
@@ -842,6 +919,44 @@ app.get('/public/categories', authOptional, async (req, res) => {
   }
 });
 app.post("/admin/categories/create", authRole(["admin","mainadmin"]), createCategoryHandler);
+
+// Reorder categories (admin)
+async function reorderCategories(id, direction, newIndex) {
+  const { rows } = await pool.query(`SELECT id FROM categories ORDER BY order_index ASC, lower(name) ASC`);
+  let list = rows.map(r => r.id);
+  let idx = list.indexOf(Number(id));
+  if (idx === -1) return;
+  const move = () => {
+    if (typeof newIndex === 'number' && Number.isFinite(newIndex)) {
+      const item = list.splice(idx,1)[0];
+      list.splice(Math.max(0, Math.min(newIndex, list.length)), 0, item);
+    } else if (direction === 'up' && idx > 0) {
+      [list[idx-1], list[idx]] = [list[idx], list[idx-1]];
+    } else if (direction === 'down' && idx < list.length - 1) {
+      [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
+    }
+  };
+  move();
+  await pool.query('BEGIN');
+  try {
+    for (let i=0;i<list.length;i++) {
+      await pool.query('UPDATE categories SET order_index=$1 WHERE id=$2', [i, list[i]]);
+    }
+    await pool.query('COMMIT');
+  } catch(e) {
+    await pool.query('ROLLBACK');
+    throw e;
+  }
+}
+app.post('/api/admin/categories/reorder', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    const { id, direction, newIndex } = req.body || {};
+    if (!id) return res.status(400).json({ error: 'id required' });
+    await reorderCategories(id, direction, Number.isFinite(newIndex) ? Number(newIndex) : undefined);
+    const { rows } = await pool.query('SELECT id FROM categories ORDER BY order_index ASC, lower(name) ASC');
+    res.json({ ok: true, order: rows.map(r => r.id) });
+  } catch(e){ console.error('categories reorder error:', e); res.status(500).send('Reorder failed'); }
+});
 
 /* ===================== Expenses (Postgres) ===================== */
 function rowToExpense(r) {
@@ -861,7 +976,8 @@ function rowToExpense(r) {
     submittedById: r.submitted_by_id,
     approvedBy: r.approved_by,
     approvedById: r.approved_by_id,
-    approvedAt: r.approved_at
+    approvedAt: r.approved_at,
+    orderIndex: r.order_index ?? null
   };
 }
 
@@ -886,13 +1002,14 @@ app.get('/api/expenses/list', authRole(['user','admin','mainadmin']), async (req
 
       let sql = 'SELECT * FROM expenses';
       if (where.length) sql += ' WHERE ' + where.join(' AND ');
-      sql += ' ORDER BY COALESCE(date, created_at) DESC';
+      sql += ' ORDER BY order_index ASC NULLS LAST, COALESCE(date, created_at) DESC';
       const { rows } = await pool.query(sql, values);
       return res.json(rows.map(rowToExpense));
     } else {
       // approved+enabled
       let sql = `SELECT * FROM expenses WHERE approved = true AND enabled = true`;
       if (where.length) sql += ' AND ' + where.join(' AND ');
+      sql += ' ORDER BY order_index ASC NULLS LAST, COALESCE(date, created_at) DESC';
       const { rows: approvedEnabled } = await pool.query(sql, values);
       let list = approvedEnabled.map(rowToExpense);
 
@@ -901,13 +1018,15 @@ app.get('/api/expenses/list', authRole(['user','admin','mainadmin']), async (req
         mineVals.push(req.user.username);
         let mineWhere = where.length ? ' AND ' + where.join(' AND ') : '';
         const { rows: mine } = await pool.query(
-          `SELECT * FROM expenses WHERE submitted_by = $${mineVals.length} AND approved = false${mineWhere}`, mineVals
+          `SELECT * FROM expenses WHERE submitted_by = $${mineVals.length} AND approved = false${mineWhere} ORDER BY order_index ASC NULLS LAST, COALESCE(date, created_at) DESC`,
+          mineVals
         );
         const seen = new Set(list.map(x=>x.id));
         for (const r of mine) { if (!seen.has(r.id)) list.push(rowToExpense(r)); }
       }
 
-      list.sort((a,b)=> new Date(b.date||b.createdAt) - new Date(a.date||a.createdAt));
+      // Final: orderIndex asc then date desc
+      list.sort((a,b) => (a.orderIndex ?? 1e9) - (b.orderIndex ?? 1e9) || new Date(b.date || b.createdAt) - new Date(a.date || a.createdAt));
       return res.json(list);
     }
   } catch (e) {
@@ -915,6 +1034,14 @@ app.get('/api/expenses/list', authRole(['user','admin','mainadmin']), async (req
     res.status(500).send('Failed to list expenses');
   }
 });
+
+async function nextExpenseOrderForCategory(category) {
+  const { rows } = await pool.query(
+    `SELECT COALESCE(MAX(order_index), -1) + 1 AS next FROM expenses WHERE lower(trim(category)) = lower(trim($1))`,
+    [category]
+  );
+  return Number(rows[0]?.next || 0);
+}
 
 app.post('/api/expenses/submit', authRole(['user','admin','mainadmin']), async (req, res) => {
   try {
@@ -925,10 +1052,11 @@ app.post('/api/expenses/submit', authRole(['user','admin','mainadmin']), async (
     if (!cat) return res.status(400).json({ error: 'category (event) is required' });
     if (!Number.isFinite(amt)) return res.status(400).json({ error: 'amount must be a number' });
     const now = new Date();
+    const orderIndex = await nextExpenseOrderForCategory(cat);
     const { rows } = await pool.query(
-      `INSERT INTO expenses (amount, category, description, paid_to, date, created_at, updated_at, enabled, approved, status, submitted_by, submitted_by_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$6,true,false,'pending',$7,$8) RETURNING *`,
-      [amt, cat, (description||'').trim(), (paidTo||'').trim(), date ? new Date(date) : now, now, req.user?.username || null, req.user?.id || null]
+      `INSERT INTO expenses (amount, category, description, paid_to, date, created_at, updated_at, enabled, approved, status, submitted_by, submitted_by_id, order_index)
+       VALUES ($1,$2,$3,$4,$5,$6,$6,true,false,'pending',$7,$8,$9) RETURNING *`,
+      [amt, cat, (description||'').trim(), (paidTo||'').trim(), date ? new Date(date) : now, now, req.user?.username || null, req.user?.id || null, orderIndex]
     );
     const e = rowToExpense(rows[0]);
     if (e.submittedBy) {
@@ -958,12 +1086,13 @@ app.post('/api/expenses', authRole(['admin','mainadmin']), async (req, res) => {
 
     const approve = !(approveNow === false || approveNow === 'false');
     const now = new Date();
+    const orderIndex = await nextExpenseOrderForCategory(cat);
     const { rows } = await pool.query(
-      `INSERT INTO expenses (amount, category, description, paid_to, date, created_at, updated_at, enabled, approved, status, submitted_by, submitted_by_id, approved_by, approved_by_id, approved_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$6,true,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
+      `INSERT INTO expenses (amount, category, description, paid_to, date, created_at, updated_at, enabled, approved, status, submitted_by, submitted_by_id, approved_by, approved_by_id, approved_at, order_index)
+       VALUES ($1,$2,$3,$4,$5,$6,$6,true,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
       [amt, cat, (description||'').trim(), (paidTo||'').trim(), date ? new Date(date) : now, now,
         approve, (approve ? 'approved' : 'pending'), req.user?.username || null, req.user?.id || null,
-        approve ? req.user?.username : null, approve ? req.user?.id : null, approve ? now : null]
+        approve ? req.user?.username : null, approve ? req.user?.id : null, approve ? now : null, orderIndex]
     );
     res.status(201).json({ message: 'Expense created', expense: rowToExpense(rows[0]) });
   } catch (err) {
@@ -989,6 +1118,7 @@ app.put('/api/expenses/:id', authRole(['admin','mainadmin']), async (req, res) =
     if (typeof body.paidTo === 'string') { fields.push(`paid_to = $${idx++}`); vals.push(body.paidTo.trim()); }
     if (body.date) { fields.push(`date = $${idx++}`); vals.push(new Date(body.date)); }
     if (body.enabled !== undefined) { fields.push(`enabled = $${idx++}`); vals.push(!(body.enabled === false || body.enabled === 'false')); }
+    if (body.orderIndex !== undefined) { fields.push(`order_index = $${idx++}`); vals.push(Number(body.orderIndex)); }
 
     if (!fields.length) return res.status(400).json({ error: 'no fields to update' });
 
@@ -1065,6 +1195,48 @@ app.delete('/api/expenses/:id', authRole(['admin','mainadmin']), async (req, res
   }
 });
 
+// Reorder Expenses per-category
+async function reorderExpenses(expenseId, direction, newIndex, category) {
+  if (!category) {
+    const { rows } = await pool.query(`SELECT category FROM expenses WHERE id=$1`, [expenseId]);
+    if (!rows.length) return;
+    category = rows[0].category;
+  }
+  const { rows } = await pool.query(
+    `SELECT id FROM expenses
+     WHERE lower(trim(category)) = lower(trim($1))
+     ORDER BY order_index ASC NULLS LAST, COALESCE(date, created_at) DESC, id ASC`, [category]
+  );
+  let list = rows.map(r => r.id);
+  let idx = list.indexOf(Number(expenseId));
+  if (idx === -1) return;
+  if (typeof newIndex === 'number' && Number.isFinite(newIndex)) {
+    const item = list.splice(idx,1)[0];
+    list.splice(Math.max(0, Math.min(newIndex, list.length)), 0, item);
+  } else if (direction === 'up' && idx > 0) {
+    [list[idx-1], list[idx]] = [list[idx], list[idx-1]];
+  } else if (direction === 'down' && idx < list.length - 1) {
+    [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
+  }
+  await pool.query('BEGIN');
+  try {
+    for (let i=0;i<list.length;i++) {
+      await pool.query('UPDATE expenses SET order_index=$1 WHERE id=$2', [i, list[i]]);
+    }
+    await pool.query('COMMIT');
+  } catch(e) {
+    await pool.query('ROLLBACK'); throw e;
+  }
+}
+app.post('/admin/expenses/:id/reorder', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { direction, newIndex, category } = req.body || {};
+    await reorderExpenses(id, direction, Number.isFinite(newIndex) ? Number(newIndex) : undefined, category);
+    res.json({ ok: true });
+  } catch (e) { console.error('expenses reorder error:', e); res.status(500).send('Reorder failed'); }
+});
+
 /* ===================== Donations (Postgres + Cloudinary screenshot) ===================== */
 const donationScreenshotStorage = new CloudinaryStorage({
   cloudinary,
@@ -1105,8 +1277,17 @@ function rowToDonation(r) {
     approvedById: r.approved_by_id,
     approvedByRole: r.approved_by_role,
     approvedByName: r.approved_by_name,
-    approvedAt: r.approved_at
+    approvedAt: r.approved_at,
+    orderIndex: r.order_index ?? null
   };
+}
+
+async function nextDonationOrderForCategory(category) {
+  const { rows } = await pool.query(
+    `SELECT COALESCE(MAX(order_index), -1) + 1 AS next FROM donations WHERE lower(trim(category)) = lower(trim($1))`,
+    [category]
+  );
+  return Number(rows[0]?.next || 0);
 }
 
 async function createDonationHandler(req, res) {
@@ -1119,15 +1300,16 @@ async function createDonationHandler(req, res) {
     const code = await generateUniqueReceiptCodeDB();
     const screenshotUrl = req.file?.path || null;
     const screenshotPublicId = req.file?.filename || null;
+    const orderIndex = await nextDonationOrderForCategory(category);
 
     const { rows } = await pool.query(
       `INSERT INTO donations
        (donor_user_id, donor_username, donor_name, amount, payment_method, category, cash_receiver_name,
-        approved, status, created_at, updated_at, screenshot_public_id, screenshot_url, receipt_code)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,false,'pending',now(),now(),$8,$9,$10)
+        approved, status, created_at, updated_at, screenshot_public_id, screenshot_url, receipt_code, order_index)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,false,'pending',now(),now(),$8,$9,$10,$11)
        RETURNING *`,
       [req.user.id, req.user.username, String(donorName).trim(), Number(amount), paymentMethod, category,
-        cashReceiverName || null, screenshotPublicId, screenshotUrl, code]
+        cashReceiverName || null, screenshotPublicId, screenshotUrl, code, orderIndex]
     );
     res.status(201).json({ message: 'Donation submitted', donation: rowToDonation(rows[0]) });
   } catch (err) {
@@ -1153,7 +1335,7 @@ app.get('/myaccount/receipts', authRole(['user','admin','mainadmin']), async (re
   const { rows } = await pool.query(
     `SELECT * FROM donations WHERE approved = true AND (
       donor_username = $1 OR donor_name = $1
-    ) ORDER BY created_at DESC`, [username]
+    ) ORDER BY order_index ASC NULLS LAST, created_at DESC`, [username]
   );
   res.json(rows.map(rowToDonation));
 });
@@ -1174,7 +1356,7 @@ app.get('/api/donations/donations', authRole(['user','admin','mainadmin']), asyn
              OR lower(coalesce(category,'')) ILIKE lower($1)`;
       vals = [`%${q}%`];
     }
-    sql += ' ORDER BY created_at DESC';
+    sql += ' ORDER BY order_index ASC NULLS LAST, created_at DESC';
     const { rows } = await pool.query(sql, vals);
     return res.json(rows.map(r => redactDonationForRole(rowToDonation(r), role)));
   }
@@ -1189,7 +1371,7 @@ app.get('/api/donations/donations', authRole(['user','admin','mainadmin']), asyn
                  OR lower(coalesce(category,'')) ILIKE lower($2))`;
     vals.push(`%${q}%`);
   }
-  const sql = 'SELECT * FROM donations' + where + ' ORDER BY created_at DESC';
+  const sql = 'SELECT * FROM donations' + where + ' ORDER BY order_index ASC NULLS LAST, created_at DESC';
   const { rows } = await pool.query(sql, vals);
   res.json(rows.map(r => redactDonationForRole(rowToDonation(r), role)));
 });
@@ -1207,7 +1389,7 @@ app.get('/api/donations/all-donations', authRole(['admin', 'mainadmin']), async 
            OR lower(coalesce(category,'')) ILIKE lower($1)`;
     vals = [`%${q}%`];
   }
-  sql += ' ORDER BY created_at DESC';
+  sql += ' ORDER BY order_index ASC NULLS LAST, created_at DESC';
   const { rows } = await pool.query(sql, vals);
   res.json(rows.map(r => redactDonationForRole(rowToDonation(r), role)));
 });
@@ -1227,21 +1409,24 @@ app.get('/api/donations/search', authRole(['user','admin','mainadmin']), async (
                OR lower(coalesce(donor_username,'')) ILIKE lower($1)
                OR lower(coalesce(receipt_code,'')) ILIKE lower($1)
                OR lower(coalesce(category,'')) ILIKE lower($1)
-             ORDER BY created_at DESC LIMIT 100`;
+             ORDER BY order_index ASC NULLS LAST, created_at DESC LIMIT 100`;
       vals = [like];
     } else {
-      sql = `SELECT * FROM donations
-             WHERE approved = true
-               AND (lower(coalesce(donor_name,'')) ILIKE lower($1)
-                 OR lower(coalesce(receipt_code,'')) ILIKE lower($1)
-                 OR lower(coalesce(category,'')) ILIKE lower($1))
-             UNION ALL
-             SELECT * FROM donations
-              WHERE donor_username = $2 AND approved = false
-                AND (lower(coalesce(donor_name,'')) ILIKE lower($1)
-                  OR lower(coalesce(receipt_code,'')) ILIKE lower($1)
-                  OR lower(coalesce(category,'')) ILIKE lower($1))
-             ORDER BY created_at DESC LIMIT 100`;
+      sql = `
+        SELECT * FROM (
+          SELECT * FROM donations
+           WHERE approved = true
+             AND (lower(coalesce(donor_name,'')) ILIKE lower($1)
+               OR lower(coalesce(receipt_code,'')) ILIKE lower($1)
+               OR lower(coalesce(category,'')) ILIKE lower($1))
+          UNION ALL
+          SELECT * FROM donations
+            WHERE donor_username = $2 AND approved = false
+              AND (lower(coalesce(donor_name,'')) ILIKE lower($1)
+                OR lower(coalesce(receipt_code,'')) ILIKE lower($1)
+                OR lower(coalesce(category,'')) ILIKE lower($1))
+        ) t
+        ORDER BY COALESCE(order_index, 2147483647) ASC, created_at DESC LIMIT 100`;
       vals = [like, req.user.username];
     }
     const { rows } = await pool.query(sql, vals);
@@ -1254,7 +1439,7 @@ app.get('/api/donations/search', authRole(['user','admin','mainadmin']), async (
 
 app.get('/admin/donations/pending', authRole(['admin', 'mainadmin']), async (req, res) => {
   await ensureDonationsTable();
-  const { rows } = await pool.query('SELECT * FROM donations WHERE approved=false ORDER BY created_at DESC');
+  const { rows } = await pool.query('SELECT * FROM donations WHERE approved=false ORDER BY order_index ASC NULLS LAST, created_at DESC');
   res.json(rows.map(rowToDonation));
 });
 
@@ -1344,6 +1529,7 @@ async function handleDonationUpdate(req, res) {
     if (typeof body.category === 'string') { fields.push(`category = $${idx++}`); vals.push(body.category.trim()); }
     if (typeof body.paymentMethod === 'string') { fields.push(`payment_method = $${idx++}`); vals.push(body.paymentMethod.trim()); }
     if (typeof body.cashReceiverName === 'string') { fields.push(`cash_receiver_name = $${idx++}`); vals.push(body.cashReceiverName.trim()); }
+    if (typeof body.orderIndex === 'number') { fields.push(`order_index = $${idx++}`); vals.push(Number(body.orderIndex)); }
 
     if (typeof body.receiptCode === 'string' && body.receiptCode.trim()) {
       const rc = body.receiptCode.trim().toUpperCase();
@@ -1371,6 +1557,48 @@ async function handleDonationUpdate(req, res) {
 }
 app.put('/admin/donations/:id', authRole(['admin', 'mainadmin']), handleDonationUpdate);
 app.put('/api/donations/:id', authRole(['admin', 'mainadmin']), handleDonationUpdate);
+
+// Reorder Donations per-category
+async function reorderDonations(donationId, direction, newIndex, category) {
+  if (!category) {
+    const { rows } = await pool.query(`SELECT category FROM donations WHERE id=$1`, [donationId]);
+    if (!rows.length) return;
+    category = rows[0].category;
+  }
+  const { rows } = await pool.query(
+    `SELECT id FROM donations
+     WHERE lower(trim(category)) = lower(trim($1))
+     ORDER BY order_index ASC NULLS LAST, created_at DESC, id ASC`, [category]
+  );
+  let list = rows.map(r => r.id);
+  let idx = list.indexOf(Number(donationId));
+  if (idx === -1) return;
+  if (typeof newIndex === 'number' && Number.isFinite(newIndex)) {
+    const item = list.splice(idx,1)[0];
+    list.splice(Math.max(0, Math.min(newIndex, list.length)), 0, item);
+  } else if (direction === 'up' && idx > 0) {
+    [list[idx-1], list[idx]] = [list[idx], list[idx-1]];
+  } else if (direction === 'down' && idx < list.length - 1) {
+    [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
+  }
+  await pool.query('BEGIN');
+  try {
+    for (let i=0;i<list.length;i++) {
+      await pool.query('UPDATE donations SET order_index=$1 WHERE id=$2', [i, list[i]]);
+    }
+    await pool.query('COMMIT');
+  } catch(e) {
+    await pool.query('ROLLBACK'); throw e;
+  }
+}
+app.post('/admin/donations/:id/reorder', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { direction, newIndex, category } = req.body || {};
+    await reorderDonations(id, direction, Number.isFinite(newIndex) ? Number(newIndex) : undefined, category);
+    res.json({ ok: true });
+  } catch (e) { console.error('donations reorder error:', e); res.status(500).send('Reorder failed'); }
+});
 
 /* ===================== Gallery (Cloudinary + Postgres) ===================== */
 const ALLOWED_ICON_KEYS = new Set([
@@ -1866,9 +2094,9 @@ app.get('/ebooks/folders', authRole(['user','admin','mainadmin']), async (req, r
     const role = req.user?.role || 'user';
     const isAdmin = role === 'admin' || role === 'mainadmin';
     const includeDisabled = ['1','true'].includes(String(req.query.includeDisabled || '').toLowerCase());
-    let sql = 'SELECT slug, name, enabled FROM ebook_folders';
+    let sql = 'SELECT slug, name, enabled, order_index FROM ebook_folders';
     if (!isAdmin && !includeDisabled) sql += ' WHERE enabled = true';
-    sql += ' ORDER BY lower(name) ASC';
+    sql += ' ORDER BY order_index ASC, lower(name) ASC';
     const { rows } = await pool.query(sql);
     const out = [];
     for (const f of rows) {
@@ -1878,7 +2106,8 @@ app.get('/ebooks/folders', authRole(['user','admin','mainadmin']), async (req, r
         slug: f.slug,
         url: null,
         fileCount: cnt[0].c,
-        enabled: f.enabled !== false
+        enabled: f.enabled !== false,
+        order: f.order_index || 0
       });
     }
     res.json(out);
@@ -1932,8 +2161,8 @@ app.post('/ebooks/folders/create', authRole(['admin','mainadmin']), async (req, 
     if (!name || !String(name).trim()) return res.status(400).json({ error: 'name is required' });
     const slug = slugify(String(name));
     await pool.query(
-      `INSERT INTO ebook_folders (slug, name, enabled)
-       VALUES ($1,$2,true)`,
+      `INSERT INTO ebook_folders (slug, name, enabled, order_index)
+       VALUES ($1,$2,true, COALESCE((SELECT COALESCE(MAX(order_index),-1)+1 FROM ebook_folders),0))`,
       [slug, String(name).trim()]
     );
     res.status(201).json({ name: String(name).trim(), slug });
@@ -1960,7 +2189,7 @@ app.post('/ebooks/folders/:slug/rename', authRole(['admin','mainadmin']), async 
 
     await pool.query('BEGIN');
     if (newSlug !== slug) {
-      await pool.query('INSERT INTO ebook_folders (slug, name, enabled) VALUES ($1,$2,$3) ON CONFLICT (slug) DO NOTHING', [newSlug, desired, exists[0].enabled]);
+      await pool.query('INSERT INTO ebook_folders (slug, name, enabled, order_index) VALUES ($1,$2,$3,$4) ON CONFLICT (slug) DO NOTHING', [newSlug, desired, exists[0].enabled, exists[0].order_index]);
       await pool.query('UPDATE ebook_files SET folder_slug=$1 WHERE folder_slug=$2', [newSlug, slug]);
       await pool.query('DELETE FROM ebook_folders WHERE slug=$1', [slug]);
     } else {
@@ -2193,20 +2422,48 @@ app.post('/ebooks/files/reorder', authRole(['admin','mainadmin']), async (req, r
   }
 });
 
-// ===================== Analytics-aware Totals (Categories se independent) =====================
+// Reorder Ebook folders (new)
+async function reorderEbookFolders(slug, direction, newIndex) {
+  const { rows } = await pool.query(`SELECT slug FROM ebook_folders ORDER BY order_index ASC, lower(name) ASC`);
+  let list = rows.map(r => r.slug);
+  let idx = list.indexOf(String(slug));
+  if (idx === -1) return;
+  if (typeof newIndex === 'number' && Number.isFinite(newIndex)) {
+    const it = list.splice(idx,1)[0];
+    list.splice(Math.max(0, Math.min(newIndex, list.length)), 0, it);
+  } else if (direction === 'up' && idx > 0) {
+    [list[idx-1], list[idx]] = [list[idx], list[idx-1]];
+  } else if (direction === 'down' && idx < list.length - 1) {
+    [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
+  }
+  await pool.query('BEGIN');
+  try {
+    for (let i=0;i<list.length;i++) {
+      await pool.query('UPDATE ebook_folders SET order_index=$1 WHERE slug=$2', [i, list[i]]);
+    }
+    await pool.query('COMMIT');
+  } catch (e) { await pool.query('ROLLBACK'); throw e; }
+}
+app.post('/ebooks/folders/reorder', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    const { slug, direction, newIndex } = req.body || {};
+    if (!slug) return res.status(400).json({ error: 'slug required' });
+    await reorderEbookFolders(slug, direction, Number.isFinite(newIndex) ? Number(newIndex) : undefined);
+    const { rows } = await pool.query('SELECT slug FROM ebook_folders ORDER BY order_index ASC, lower(name) ASC');
+    res.json({ ok: true, order: rows.map(r => r.slug) });
+  } catch(e){ console.error('ebooks folders reorder error:', e); res.status(500).send('Reorder failed'); }
+});
+
+/* ===================== Analytics + Totals (DB-based) ===================== */
+// Analytics-aware totals (Categories se independent; only Analytics Events/Folder enabled matter)
 app.get('/totals', authRole(['user','admin','mainadmin']), async (req, res) => {
   try {
-    // Ensure tables
     if (global.AnalyticsAdmin?.ensure) await global.AnalyticsAdmin.ensure();
-    await ensureDonationsTable();
-    await ensureExpensesTable();
+    await ensureDonationsTable(); await ensureExpensesTable();
 
-    // Helpful index (one-time; ideally move to a migration/startup)
-    await pool.query(`
-      CREATE INDEX IF NOT EXISTS idx_analytics_events_name_lower ON analytics_events ((lower(name)));
-    `);
+    // Ensure helpful index
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_analytics_events_name_lower ON analytics_events ((lower(name)));`);
 
-    // Donations: only if category matches an ENABLED analytics_event in an ENABLED folder
     const dSql = `
       SELECT COALESCE(SUM(d.amount),0) AS total
       FROM donations d
@@ -2217,11 +2474,8 @@ app.get('/totals', authRole(['user','admin','mainadmin']), async (req, res) => {
           JOIN analytics_folders f ON f.id = ev.folder_id
           WHERE ev.enabled = true
             AND f.enabled = true
-            AND lower(ev.name) = lower(d.category)
-        )
-    `;
-
-    // Expenses: only if category matches an ENABLED analytics_event in an ENABLED folder
+            AND lower(trim(ev.name)) = lower(trim(d.category))
+        )`;
     const eSql = `
       SELECT COALESCE(SUM(e.amount),0) AS total
       FROM expenses e
@@ -2233,15 +2487,10 @@ app.get('/totals', authRole(['user','admin','mainadmin']), async (req, res) => {
           JOIN analytics_folders f ON f.id = ev.folder_id
           WHERE ev.enabled = true
             AND f.enabled = true
-            AND lower(ev.name) = lower(e.category)
-        )
-    `;
+            AND lower(trim(ev.name)) = lower(trim(e.category))
+        )`;
 
-    const [{ rows: d }, { rows: e }] = await Promise.all([
-      pool.query(dSql),
-      pool.query(eSql),
-    ]);
-
+    const [{ rows: d }, { rows: e }] = await Promise.all([pool.query(dSql), pool.query(eSql)]);
     const totalDonation = Number(d[0]?.total || 0);
     const totalExpense  = Number(e[0]?.total || 0);
     res.json({ totalDonation, totalExpense, balance: totalDonation - totalExpense });
@@ -2250,6 +2499,7 @@ app.get('/totals', authRole(['user','admin','mainadmin']), async (req, res) => {
     res.status(500).send('Totals failed');
   }
 });
+
 /* ===================== NEW ANALYTICS SUMMARY ENDPOINT ===================== */
 app.get('/analytics/summary', authRole(['user','admin','mainadmin']), async (req, res) => {
   try {
@@ -2269,14 +2519,15 @@ app.get('/analytics/summary', authRole(['user','admin','mainadmin']), async (req
     );
 
     // 3. Fetch actual financial data (Approved Donations & Approved+Enabled Expenses)
-    //    Hum raw data layenge taaki detail lists bhi bana sakein
     const { rows: donations } = await pool.query(
-      `SELECT amount, category, donor_name, date(created_at) as date, receipt_code
-       FROM donations WHERE approved=true ORDER BY created_at DESC`
+      `SELECT amount, category, donor_name, date(created_at) as date, receipt_code, order_index
+       FROM donations WHERE approved=true
+       ORDER BY order_index ASC NULLS LAST, created_at DESC`
     );
     const { rows: expenses } = await pool.query(
-      `SELECT amount, category, description, date
-       FROM expenses WHERE approved=true AND enabled=true ORDER BY date DESC`
+      `SELECT amount, category, description, date, order_index
+       FROM expenses WHERE approved=true AND enabled=true
+       ORDER BY order_index ASC NULLS LAST, COALESCE(date, created_at) DESC`
     );
 
     // 4. Helper to normalize category names for matching
@@ -2290,7 +2541,6 @@ app.get('/analytics/summary', authRole(['user','admin','mainadmin']), async (req
       if (!dataMap.has(cat)) dataMap.set(cat, { donationTotal:0, expenseTotal:0, donations:[] });
       const entry = dataMap.get(cat);
       entry.donationTotal += Number(d.amount || 0);
-      // Detail sheet ke liye minimal data save karein
       entry.donations.push({
         donorName: d.donor_name,
         amount: Number(d.amount),
@@ -2305,14 +2555,11 @@ app.get('/analytics/summary', authRole(['user','admin','mainadmin']), async (req
     }
 
     // 6. Build the structured response for the User App
-    // Structure: [ { folderName: "X", events: { "EventA": { ...data... } } } ]
     const response = folders.map(folder => {
       const folderEvents = {};
-      // Is folder ke events filter karein
       const myEvents = eventsCfg.filter(e => e.folder_id === folder.id);
 
       for (const ev of myEvents) {
-        // Event ka naam hi category key hai
         const catKey = norm(ev.name);
         const data = dataMap.get(catKey) || { donationTotal: 0, expenseTotal: 0, donations: [] };
 
@@ -2334,9 +2581,6 @@ app.get('/analytics/summary', authRole(['user','admin','mainadmin']), async (req
       };
     });
 
-    // (Optional) You could add an "Other" folder here for data that didn't match any configured event.
-
-    // 7. Send final JSON
     res.json(response);
 
   } catch (e) {
@@ -2344,18 +2588,19 @@ app.get('/analytics/summary', authRole(['user','admin','mainadmin']), async (req
     res.status(500).send('Analytics summary failed');
   }
 });
+
 /* ===================== Debug endpoints ===================== */
 app.get('/debug/donations', async (req, res) => {
   try {
     await ensureDonationsTable();
-    const { rows: all } = await pool.query('SELECT id, amount, category, approved, receipt_code FROM donations');
+    const { rows: all } = await pool.query('SELECT id, amount, category, approved, receipt_code, order_index FROM donations ORDER BY order_index ASC NULLS LAST, created_at DESC LIMIT 100');
     const approved = all.filter(d => d.approved);
     res.json({
       allCount: all.length,
       approvedCount: approved.length,
       approvedSample: approved.map(d => ({
         code: d.receipt_code, receiptCode: d.receipt_code,
-        amount: Number(d.amount || 0), category: d.category, approved: d.approved
+        amount: Number(d.amount || 0), category: d.category, approved: d.approved, orderIndex: d.order_index ?? null
       })).slice(0, 10),
     });
   } catch (e) {
@@ -2365,7 +2610,7 @@ app.get('/debug/donations', async (req, res) => {
 app.get('/debug/expenses', async (req, res) => {
   try {
     await ensureExpensesTable();
-    const { rows } = await pool.query('SELECT * FROM expenses ORDER BY id DESC LIMIT 100');
+    const { rows } = await pool.query('SELECT * FROM expenses ORDER BY order_index ASC NULLS LAST, id DESC LIMIT 100');
     res.json({ count: rows.length, sample: rows.map(rowToExpense) });
   } catch (e) {
     res.status(500).json({ error: 'debug failed' });
@@ -2375,6 +2620,28 @@ app.get('/debug/expenses', async (req, res) => {
 // Whoami
 app.get('/admin/whoami', authRole(['admin','mainadmin']), (req, res) => {
   res.json(req.user);
+});
+
+/* ===================== Analytics Admin reorder wrapper endpoints ===================== */
+app.post('/analytics/admin/_reorder-folder', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    if (global.AnalyticsAdmin?.ensure) await global.AnalyticsAdmin.ensure();
+    const { folderId, direction, newIndex } = req.body || {};
+    if (!folderId) return res.status(400).json({ error: 'folderId required' });
+    await global.AnalyticsAdmin.reorderFolders(Number(folderId), direction, Number.isFinite(newIndex) ? Number(newIndex) : undefined);
+    const { rows } = await pool.query('SELECT id FROM analytics_folders ORDER BY order_index ASC, lower(name) ASC');
+    res.json({ ok: true, order: rows.map(r => r.id) });
+  } catch (e) { console.error('analytics folder reorder error:', e); res.status(500).send('Reorder failed'); }
+});
+app.post('/analytics/admin/_reorder-event', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    if (global.AnalyticsAdmin?.ensure) await global.AnalyticsAdmin.ensure();
+    const { folderId, eventId, direction, newIndex } = req.body || {};
+    if (!folderId || !eventId) return res.status(400).json({ error: 'folderId and eventId required' });
+    await global.AnalyticsAdmin.reorderEvents(Number(folderId), Number(eventId), direction, Number.isFinite(newIndex) ? Number(newIndex) : undefined);
+    const { rows } = await pool.query('SELECT id FROM analytics_events WHERE folder_id=$1 ORDER BY order_index ASC, id ASC', [folderId]);
+    res.json({ ok: true, order: rows.map(r => r.id) });
+  } catch (e) { console.error('analytics event reorder error:', e); res.status(500).send('Reorder failed'); }
 });
 
 /* ===================== Health + Start ===================== */
@@ -2424,6 +2691,13 @@ async function start() {
     await ensureEbooksTables();
     await ensureCategoriesTable();
     await fixCategoryDefaults();
+
+    // Ensure ordering and backfill
+    await ensureOrderingColumns();
+    await backfillOrderIndexes();
+
+    // Helpful analytics index for totals
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_analytics_events_name_lower ON analytics_events ((lower(name)));`);
 
     await seedAdmin();
     app.listen(PORT, HOST, () => {
