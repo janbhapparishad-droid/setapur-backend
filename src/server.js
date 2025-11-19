@@ -1812,6 +1812,102 @@ app.post('/gallery/home/images/reorder', authRole(['admin', 'mainadmin']), async
   }
 });
 
+// --- MISSING HOME GALLERY ACTIONS (Paste below Reorder) ---
+
+// 2. Upload to Home (Root)
+app.post('/gallery/home/upload', authRole(['admin','mainadmin']), uploadGalleryCloud.array('images', 25), insertGalleryUploadsToDB);
+
+// 3. Rename Home Image
+app.post('/gallery/home/images/rename', authRole(['admin', 'mainadmin']), async (req, res) => {
+  try {
+    await ensureGalleryTables();
+    const slug = '_root'; // Hardcoded for home
+    const { id, filename, newName } = req.body || {};
+    if (!newName) return res.status(400).json({ error: 'newName required' });
+
+    let row = null;
+    if (id) {
+      const { rows } = await pool.query('SELECT * FROM gallery_images WHERE id=$1 AND folder_slug=$2', [id, slug]);
+      if (!rows.length) return res.status(404).json({ error: 'image not found' });
+      row = rows[0];
+    } else if (filename) {
+      const { rows } = await pool.query('SELECT * FROM gallery_images WHERE filename=$1 AND folder_slug=$2', [filename, slug]);
+      if (!rows.length) return res.status(404).json({ error: 'image not found' });
+      row = rows[0];
+    } else return res.status(400).json({ error: 'id or filename required' });
+
+    const base = path.basename(newName, path.extname(newName));
+    const safeBase = slugify(base) || 'img';
+    const newPublicId = `setapur/gallery/${slug}/${Date.now()}-${Math.round(Math.random()*1e9)}-${safeBase}`;
+
+    await cloudinary.uploader.rename(row.public_id, newPublicId, { resource_type: 'image' });
+    const newUrl = cloudinary.url(newPublicId, { secure: true });
+
+    const { rows: upd } = await pool.query(
+      'UPDATE gallery_images SET public_id=$1, url=$2, filename=$3 WHERE id=$4 RETURNING *',
+      [newPublicId, newUrl, `${safeBase}${path.extname(row.filename)}`, row.id]
+    );
+
+    res.json({ ok: true, filename: upd[0].filename, url: upd[0].url });
+  } catch (e) {
+    console.error('rename home image error:', e);
+    res.status(500).send('Failed to rename image');
+  }
+});
+
+// 4. Delete Home Image
+app.delete('/gallery/home/images', authRole(['admin', 'mainadmin']), async (req, res) => {
+  try {
+    await ensureGalleryTables();
+    const slug = '_root';
+    // Check query params OR body for ID/filename
+    const filename = req.query.filename || (req.body && req.body.filename);
+    const id = req.query.id || (req.body && req.body.id);
+    
+    if (!filename && !id) return res.status(400).json({ error: 'id or filename required' });
+
+    let row = null;
+    if (id) {
+      const { rows } = await pool.query('SELECT * FROM gallery_images WHERE id=$1 AND folder_slug=$2', [id, slug]);
+      if (!rows.length) return res.status(404).json({ error: 'image not found' });
+      row = rows[0];
+    } else {
+      const { rows } = await pool.query('SELECT * FROM gallery_images WHERE filename=$1 AND folder_slug=$2', [filename, slug]);
+      if (!rows.length) return res.status(404).json({ error: 'image not found' });
+      row = rows[0];
+    }
+
+    try { await cloudinary.uploader.destroy(row.public_id, { resource_type: 'image' }); } catch (e) { console.warn('cloud delete failed', e.message); }
+    await pool.query('DELETE FROM gallery_images WHERE id=$1', [row.id]);
+    res.json({ ok: true, filename: row.filename });
+  } catch (e) {
+    console.error('delete home image error:', e);
+    res.status(500).send('Failed to delete file');
+  }
+});
+
+// 5. Enable/Disable Home Image
+app.post('/gallery/home/images/enable', authRole(['admin', 'mainadmin']), async (req, res) => {
+  try {
+    await ensureGalleryTables();
+    const slug = '_root';
+    const { filename, id } = req.body || {};
+    const enabledRaw = req.body.enabled;
+    const enabled = enabledRaw !== false && enabledRaw !== 'false' && enabledRaw !== 0 && enabledRaw !== '0';
+    
+    if (!filename && !id) return res.status(400).json({ error: 'id or filename required' });
+
+    const cond = id ? 'id=$1 AND folder_slug=$2' : 'filename=$1 AND folder_slug=$2';
+    const vals = id ? [id, slug] : [String(filename), slug];
+    
+    const { rows } = await pool.query(`UPDATE gallery_images SET enabled=$3 WHERE ${cond} RETURNING *`, [...vals, enabled]);
+    if (!rows.length) return res.status(404).json({ error: 'image not found' });
+    res.json({ ok: true, filename: rows[0].filename, enabled: rows[0].enabled });
+  } catch (e) {
+    console.error('enable home image error:', e);
+    res.status(500).send('Failed to update image enabled');
+  }
+});
 // List images in folder
 app.get('/gallery/folders/:slug/images', authRole(['user', 'admin', 'mainadmin']), async (req, res) => {
   try {
