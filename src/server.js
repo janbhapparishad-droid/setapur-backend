@@ -1790,6 +1790,28 @@ async function listRootGalleryImages(req, res) {
 app.get('/gallery/images', authRole(['user', 'admin', 'mainadmin']), listRootGalleryImages);
 app.get('/gallery/home/images', authRole(['user', 'admin', 'mainadmin']), listRootGalleryImages);
 
+// --- ADD THIS TO SERVER.JS (Gallery Section) ---
+
+// Reorder Home/Root images
+app.post('/gallery/home/images/reorder', authRole(['admin', 'mainadmin']), async (req, res) => {
+  try {
+    await ensureGalleryTables();
+    const { filename, id, direction, newIndex } = req.body || {};
+    const target = id || filename;
+    if (!target) return res.status(400).json({ error: 'id or filename required' });
+    
+    // Home images are stored in '_root' folder slug
+    const slug = '_root';
+    
+    await reorderGalleryImages(slug, target, direction, typeof newIndex === 'number' ? newIndex : undefined);
+    const { rows } = await pool.query('SELECT filename FROM gallery_images WHERE folder_slug=$1 ORDER BY order_index ASC, id ASC', [slug]);
+    res.json({ ok: true, imageOrder: rows.map(r => r.filename) });
+  } catch (e) {
+    console.error('reorder home images error:', e);
+    res.status(500).send('Failed to reorder home images');
+  }
+});
+
 // List images in folder
 app.get('/gallery/folders/:slug/images', authRole(['user', 'admin', 'mainadmin']), async (req, res) => {
   try {
