@@ -2763,11 +2763,60 @@ app.post('/analytics/admin/_reorder-event', authRole(['admin','mainadmin']), asy
 });
 
 /* ===================== Health + Start ===================== */
+// --- BARCODE UPLOAD API ---
+const uploadBarcodeCloud = multer({
+  storage: new CloudinaryStorage({
+    cloudinary,
+    params: { folder: 'setapur/settings', allowed_formats: ['jpg','jpeg','png','webp'], resource_type: 'image' },
+  })
+});
+
+app.get('/api/settings/barcode', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT value FROM global_settings WHERE key = $1', ['barcode_url']);
+    if (rows.length > 0) {
+      res.json({ url: rows[0].value });
+    } else {
+      res.json({ url: null });
+    }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/settings/barcode', authRole(['admin', 'mainadmin']), uploadBarcodeCloud.single('image'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No image uploaded' });
+    }
+    const url = req.file.path;
+    await pool.query(
+      'INSERT INTO global_settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
+      ['barcode_url', url]
+    );
+    res.json({ success: true, url });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+app.delete('/api/settings/barcode', authRole(['admin', 'mainadmin']), async (req, res) => {
+  try {
+    await pool.query('DELETE FROM global_settings WHERE key = $1', ['barcode_url']);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+// ----------------------------
 // --- SUPPORT CONTACTS API ---
 async function ensureSupportContactsTable() {
   await pool.query('CREATE TABLE IF NOT EXISTS support_contacts (id SERIAL PRIMARY KEY, number VARCHAR(50) NOT NULL)');
 }
 ensureSupportContactsTable().catch(console.error);
+async function ensureGlobalSettingsTable() {
+  await pool.query('CREATE TABLE IF NOT EXISTS global_settings (key VARCHAR(50) PRIMARY KEY, value TEXT)');
+}
+ensureGlobalSettingsTable().catch(console.error);
 
 app.get('/api/support-contacts', async (req, res) => {
   try {
@@ -2895,6 +2944,7 @@ app.post('/admin/create-user', authRole(['admin','mainadmin']), async (req, res)
     res.status(500).json({ error: 'Create user failed' });
   }
 });
+
 
 
 
