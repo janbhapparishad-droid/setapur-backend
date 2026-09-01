@@ -2808,6 +2808,55 @@ app.delete('/api/settings/barcode', authRole(['admin', 'mainadmin']), async (req
   }
 });
 // ----------------------------
+// --- CHARTS API ---
+app.get('/api/analytics/charts', authRole(['admin', 'mainadmin']), async (req, res) => {
+  try {
+    const catRes = await pool.query(`
+      SELECT category, SUM(amount) as total
+      FROM donations
+      WHERE status = 'approved'
+      GROUP BY category
+      ORDER BY total DESC
+    `);
+    
+    const monthlyQuery = `
+      WITH months AS (
+        SELECT to_char(date_trunc('month', d), 'YYYY-MM') as month
+        FROM generate_series(
+          date_trunc('year', CURRENT_DATE),
+          date_trunc('year', CURRENT_DATE) + interval '11 months',
+          interval '1 month'
+        ) d
+      ),
+      income AS (
+        SELECT to_char(created_at, 'YYYY-MM') as month, SUM(amount) as total
+        FROM donations
+        WHERE status = 'approved' AND created_at >= date_trunc('year', CURRENT_DATE)
+        GROUP BY 1
+      ),
+      expense AS (
+        SELECT to_char(date, 'YYYY-MM') as month, SUM(amount) as total
+        FROM expenses
+        WHERE date >= date_trunc('year', CURRENT_DATE)
+        GROUP BY 1
+      )
+      SELECT m.month, COALESCE(i.total, 0) as income, COALESCE(e.total, 0) as expense
+      FROM months m
+      LEFT JOIN income i ON m.month = i.month
+      LEFT JOIN expense e ON m.month = e.month
+      ORDER BY m.month;
+    `;
+    const monthlyRes = await pool.query(monthlyQuery);
+    
+    res.json({
+      pieChart: catRes.rows.map(r => ({ category: r.category, total: parseFloat(r.total) })),
+      barChart: monthlyRes.rows.map(r => ({ month: r.month, income: parseFloat(r.income), expense: parseFloat(r.expense) }))
+    });
+  } catch(e) {
+    res.status(500).json({error: e.message});
+  }
+});
+// ----------------------------
 // --- LIVE STREAM API ---
 app.get('/api/settings/live-stream', async (req, res) => {
   try {
@@ -2979,6 +3028,8 @@ app.post('/admin/create-user', authRole(['admin','mainadmin']), async (req, res)
     res.status(500).json({ error: 'Create user failed' });
   }
 });
+
+
 
 
 
