@@ -4,8 +4,6 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
 const bodyParser = require('body-parser');
-const path = require('path');
-const fs = require('fs');
 const multer = require('multer');
 const crypto = require('crypto');
 const { Pool } = require('pg');
@@ -2764,8 +2762,6 @@ app.post('/analytics/admin/_reorder-event', authRole(['admin','mainadmin']), asy
 
 /* ===================== Health + Start ===================== */
 // --- SUPPORT CONTACTS API ---
-const fs = require('fs');
-const path = require('path');
 const supportContactsFile = path.join(__dirname, '../data', 'support_contacts.json');
 
 app.get('/api/support-contacts', (req, res) => {
@@ -2884,3 +2880,4 @@ app.post('/admin/create-user', authRole(['admin','mainadmin']), async (req, res)
     res.status(500).json({ error: 'Create user failed' });
   }
 });
+
