@@ -2901,7 +2901,8 @@ app.post('/api/notifications', authRole(['admin', 'mainadmin']), async (req, res
     };
     if (imageUrl) message.notification.imageUrl = imageUrl;
 
-    const response = await admin.messaging().send(message);
+    const { getMessaging } = require('firebase-admin/messaging');
+    const response = await getMessaging().send(message);
     res.json({ success: true, messageId: response });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -3128,6 +3129,7 @@ app.post('/admin/create-user', authRole(['admin','mainadmin']), async (req, res)
     res.status(500).json({ error: 'Create user failed' });
   }
 });
+
 
 
 
