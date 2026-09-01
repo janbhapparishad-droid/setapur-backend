@@ -2808,6 +2808,75 @@ app.delete('/api/settings/barcode', authRole(['admin', 'mainadmin']), async (req
   }
 });
 // ----------------------------
+// --- CALENDAR EVENTS API ---
+async function ensureCalendarEventsTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS calendar_events (
+      id SERIAL PRIMARY KEY,
+      title TEXT NOT NULL,
+      event_date DATE NOT NULL,
+      description TEXT
+    );
+  `);
+  
+  // Seed some major Hindu festivals if table is empty
+  const { rows } = await pool.query('SELECT count(*) FROM calendar_events');
+  if (parseInt(rows[0].count) === 0) {
+    const festivals = [
+      { title: 'Maha Shivaratri', date: '2025-02-26', desc: 'Auspicious day dedicated to Lord Shiva' },
+      { title: 'Holi', date: '2025-03-14', desc: 'Festival of Colors' },
+      { title: 'Chaitra Navratri Starts', date: '2025-03-30', desc: 'Beginning of Chaitra Navratri' },
+      { title: 'Ram Navami', date: '2025-04-06', desc: 'Birth of Lord Rama' },
+      { title: 'Raksha Bandhan', date: '2025-08-09', desc: 'Festival celebrating the bond between brothers and sisters' },
+      { title: 'Krishna Janmashtami', date: '2025-08-16', desc: 'Birth of Lord Krishna' },
+      { title: 'Ganesh Chaturthi', date: '2025-08-27', desc: 'Arrival of Lord Ganesha' },
+      { title: 'Navratri Starts', date: '2025-09-22', desc: 'Beginning of Sharad Navratri' },
+      { title: 'Dussehra', date: '2025-10-02', desc: 'Victory of good over evil' },
+      { title: 'Diwali', date: '2025-10-20', desc: 'Festival of Lights' },
+      { title: 'Maha Shivaratri', date: '2026-02-15', desc: 'Auspicious day dedicated to Lord Shiva' },
+      { title: 'Holi', date: '2026-03-03', desc: 'Festival of Colors' },
+      { title: 'Ram Navami', date: '2026-03-27', desc: 'Birth of Lord Rama' },
+      { title: 'Diwali', date: '2026-11-08', desc: 'Festival of Lights' }
+    ];
+    for (const f of festivals) {
+      await pool.query('INSERT INTO calendar_events (title, event_date, description) VALUES ($1, $2, $3)', [f.title, f.date, f.desc]);
+    }
+  }
+}
+ensureCalendarEventsTable().catch(console.error);
+
+app.get('/api/calendar-events', async (req, res) => {
+  try {
+    const { rows } = await pool.query("SELECT id, title, to_char(event_date, 'YYYY-MM-DD') as date, description FROM calendar_events ORDER BY event_date ASC");
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/calendar-events', authRole(['admin', 'mainadmin']), async (req, res) => {
+  try {
+    const { title, date, description } = req.body;
+    if (!title || !date) return res.status(400).json({ error: 'Title and Date are required' });
+    const { rows } = await pool.query(
+      "INSERT INTO calendar_events (title, event_date, description) VALUES ($1, $2, $3) RETURNING id, title, to_char(event_date, 'YYYY-MM-DD') as date, description",
+      [title, date, description || '']
+    );
+    res.json({ success: true, event: rows[0] });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/api/calendar-events/:id', authRole(['admin', 'mainadmin']), async (req, res) => {
+  try {
+    await pool.query('DELETE FROM calendar_events WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+// ----------------------------
 // --- CHARTS API ---
 app.get('/api/analytics/charts', authRole(['admin', 'mainadmin']), async (req, res) => {
   try {
@@ -3028,6 +3097,7 @@ app.post('/admin/create-user', authRole(['admin','mainadmin']), async (req, res)
     res.status(500).json({ error: 'Create user failed' });
   }
 });
+
 
 
 
