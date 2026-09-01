@@ -2889,7 +2889,28 @@ try {
   console.error('Failed to initialize Firebase Admin:', e.message);
 }
 
+async function ensurePushNotificationsTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS push_notifications (
+      id SERIAL PRIMARY KEY,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL,
+      image_url TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+}
+ensurePushNotificationsTable().catch(console.error);
+
 // --- PUSH NOTIFICATIONS API ---
+app.get('/api/notifications', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM push_notifications ORDER BY created_at DESC LIMIT 50');
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 app.post('/api/notifications', authRole(['admin', 'mainadmin']), async (req, res) => {
   try {
     const { title, body, imageUrl } = req.body;
@@ -2900,6 +2921,9 @@ app.post('/api/notifications', authRole(['admin', 'mainadmin']), async (req, res
       topic: 'all_users'
     };
     if (imageUrl) message.notification.imageUrl = imageUrl;
+
+    // Save to DB
+    await pool.query('INSERT INTO push_notifications (title, body, image_url) VALUES ($1, $2, $3)', [title, body, imageUrl || null]);
 
     const { getMessaging } = require('firebase-admin/messaging');
     const response = await getMessaging().send(message);
@@ -3129,6 +3153,7 @@ app.post('/admin/create-user', authRole(['admin','mainadmin']), async (req, res)
     res.status(500).json({ error: 'Create user failed' });
   }
 });
+
 
 
 
