@@ -2763,6 +2763,28 @@ app.post('/analytics/admin/_reorder-event', authRole(['admin','mainadmin']), asy
 });
 
 /* ===================== Health + Start ===================== */
+// --- SUPPORT CONTACTS API ---
+const fs = require('fs');
+const path = require('path');
+const supportContactsFile = path.join(__dirname, '../data', 'support_contacts.json');
+
+app.get('/api/support-contacts', (req, res) => {
+  try {
+    if (fs.existsSync(supportContactsFile)) {
+      res.json(JSON.parse(fs.readFileSync(supportContactsFile, 'utf8')));
+    } else {
+      res.json([{ id: 1, number: '+91 6306003635' }]);
+    }
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+app.post('/api/support-contacts', authRole(['admin', 'mainadmin']), (req, res) => {
+  try {
+    fs.writeFileSync(supportContactsFile, JSON.stringify(req.body));
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+// ----------------------------
 app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
 
 // Mount analytics routers after auth helpers
