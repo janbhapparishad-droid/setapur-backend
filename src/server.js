@@ -2877,6 +2877,37 @@ app.delete('/api/calendar-events/:id', authRole(['admin', 'mainadmin']), async (
   }
 });
 // ----------------------------
+
+const admin = require('firebase-admin');
+try {
+  const serviceAccount = require('../serviceAccountKey.json');
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+  });
+  console.log('Firebase Admin initialized');
+} catch (e) {
+  console.error('Failed to initialize Firebase Admin:', e.message);
+}
+
+// --- PUSH NOTIFICATIONS API ---
+app.post('/api/notifications', authRole(['admin', 'mainadmin']), async (req, res) => {
+  try {
+    const { title, body, imageUrl } = req.body;
+    if (!title || !body) return res.status(400).json({ error: 'Title and Body are required' });
+
+    const message = {
+      notification: { title, body },
+      topic: 'all_users'
+    };
+    if (imageUrl) message.notification.imageUrl = imageUrl;
+
+    const response = await admin.messaging().send(message);
+    res.json({ success: true, messageId: response });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+// ----------------------------
 // --- CHARTS API ---
 app.get('/api/analytics/charts', authRole(['admin', 'mainadmin']), async (req, res) => {
   try {
@@ -3097,6 +3128,8 @@ app.post('/admin/create-user', authRole(['admin','mainadmin']), async (req, res)
     res.status(500).json({ error: 'Create user failed' });
   }
 });
+
+
 
 
 
