@@ -2808,6 +2808,40 @@ app.delete('/api/settings/barcode', authRole(['admin', 'mainadmin']), async (req
   }
 });
 // ----------------------------
+// --- LIVE STREAM API ---
+app.get('/api/settings/live-stream', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT value FROM global_settings WHERE key = $1', ['live_stream_url']);
+    res.json({ url: rows.length > 0 ? rows[0].value : null });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/settings/live-stream', authRole(['admin', 'mainadmin']), async (req, res) => {
+  try {
+    const { url } = req.body;
+    if (!url) return res.status(400).json({ error: 'URL is required' });
+    
+    await pool.query(
+      'INSERT INTO global_settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
+      ['live_stream_url', url]
+    );
+    res.json({ success: true, url });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/api/settings/live-stream', authRole(['admin', 'mainadmin']), async (req, res) => {
+  try {
+    await pool.query('DELETE FROM global_settings WHERE key = $1', ['live_stream_url']);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+// ----------------------------
 // --- SUPPORT CONTACTS API ---
 async function ensureSupportContactsTable() {
     await pool.query('CREATE TABLE IF NOT EXISTS support_contacts (id SERIAL PRIMARY KEY, number VARCHAR(50) NOT NULL, name VARCHAR(100))');
@@ -2945,6 +2979,7 @@ app.post('/admin/create-user', authRole(['admin','mainadmin']), async (req, res)
     res.status(500).json({ error: 'Create user failed' });
   }
 });
+
 
 
 
