@@ -2810,7 +2810,8 @@ app.delete('/api/settings/barcode', authRole(['admin', 'mainadmin']), async (req
 // ----------------------------
 // --- SUPPORT CONTACTS API ---
 async function ensureSupportContactsTable() {
-  await pool.query('CREATE TABLE IF NOT EXISTS support_contacts (id SERIAL PRIMARY KEY, number VARCHAR(50) NOT NULL)');
+    await pool.query('CREATE TABLE IF NOT EXISTS support_contacts (id SERIAL PRIMARY KEY, number VARCHAR(50) NOT NULL, name VARCHAR(100))');
+  try { await pool.query('ALTER TABLE support_contacts ADD COLUMN name VARCHAR(100)'); } catch(e) {}
 }
 ensureSupportContactsTable().catch(console.error);
 async function ensureGlobalSettingsTable() {
@@ -2820,11 +2821,11 @@ ensureGlobalSettingsTable().catch(console.error);
 
 app.get('/api/support-contacts', async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT id, number FROM support_contacts ORDER BY id ASC');
+    const { rows } = await pool.query('SELECT id, number, name FROM support_contacts ORDER BY id ASC');
     if (rows.length > 0) {
       res.json(rows);
     } else {
-      res.json([{ id: 1, number: '+91 6306003635' }]);
+      res.json([{ id: 1, number: '+91 6306003635', name: 'Support' }]);
     }
   } catch(e) { res.status(500).json({error: e.message}); }
 });
@@ -2835,7 +2836,7 @@ app.post('/api/support-contacts', authRole(['admin', 'mainadmin']), async (req, 
     await pool.query('BEGIN');
     await pool.query('DELETE FROM support_contacts');
     for (const c of contacts) {
-      await pool.query('INSERT INTO support_contacts (number) VALUES ()', [c.number]);
+      await pool.query('INSERT INTO support_contacts (number, name) VALUES ($1, $2)', [c.number, c.name || '']);
     }
     await pool.query('COMMIT');
     res.json({ success: true });
@@ -2944,6 +2945,8 @@ app.post('/admin/create-user', authRole(['admin','mainadmin']), async (req, res)
     res.status(500).json({ error: 'Create user failed' });
   }
 });
+
+
 
 
 
