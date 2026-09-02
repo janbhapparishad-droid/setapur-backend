@@ -1526,6 +1526,7 @@ async function handleDonationUpdate(req, res) {
       fields.push(`amount = $${idx++}`); vals.push(amt);
     }
     if (typeof body.donorName === 'string') { fields.push(`donor_name = $${idx++}`); vals.push(body.donorName.trim()); }
+    if (typeof body.donorUsername === 'string') { fields.push(`donor_username = $${idx++}`); vals.push(body.donorUsername.trim() || null); }
     if (typeof body.category === 'string') { fields.push(`category = $${idx++}`); vals.push(body.category.trim()); }
     if (typeof body.paymentMethod === 'string') { fields.push(`payment_method = $${idx++}`); vals.push(body.paymentMethod.trim()); }
     if (typeof body.cashReceiverName === 'string') { fields.push(`cash_receiver_name = $${idx++}`); vals.push(body.cashReceiverName.trim()); }
