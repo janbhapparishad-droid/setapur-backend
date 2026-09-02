@@ -6,7 +6,8 @@ const enabled = () => typeof GEMINI_API_KEY === 'string' && GEMINI_API_KEY.trim(
 router.get('/ping', (_req, res) => { res.json({ ok: true, provider: 'gemini', enabled: enabled() }); });
 
 async function fetchGeminiWithRetry(payload) {
-  const models = ['gemini-3.8-flash', 'gemini-3.7-flash'];
+  // Use flash-lite first as it does not enforce thinking/CoT, which drops latency from ~25s to ~3s
+  const models = ['gemini-3.5-flash-lite', 'gemini-3.8-flash'];
   let lastStatus = 500;
   let lastText = '';
   
