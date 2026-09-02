@@ -1,9 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-// Fallback to the provided key if not in env
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'AIzaSyC-54RvW369kmZWN-vJNomxmohwaFgmNAo';
-
 const enabled = () => typeof GEMINI_API_KEY === 'string' && GEMINI_API_KEY.trim().length > 0;
 
 router.get('/ping', (_req, res) => {
@@ -21,7 +19,6 @@ router.post('/chat', async (req, res) => {
 
     if (!inputMessages[0]?.content) return res.status(400).json({ error: 'prompt or messages required' });
 
-    // Convert OpenAI format [{role: 'user', content: '...'}] to Gemini format
     const contents = inputMessages.map(m => {
       return {
         role: m.role === 'assistant' ? 'model' : 'user',
@@ -44,7 +41,7 @@ router.post('/chat', async (req, res) => {
         };
     }
 
-    const resp = await fetch(\https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=\\, {
+    const resp = await fetch(https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -65,7 +62,6 @@ router.post('/chat', async (req, res) => {
       return res.status(502).json({ error: 'Empty AI response from provider', raw: data });
     }
 
-    // Return both 'text' and 'content' for compatibility with frontend
     res.json({ provider: 'gemini', content: text, text: text, raw: data });
   } catch (e) {
     console.error('ai/chat error:', e);
