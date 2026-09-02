@@ -3104,7 +3104,7 @@ try {
 
 try {
   const aiRoutes = require("./routes/ai");
-  app.use("/ai", authRole(["admin","mainadmin"]), aiRoutes);
+  app.use("/api/ai", authRole(["any"]), aiRoutes);
 } catch (e) {
   console.warn('ai routes not mounted:', e.message);
 }
@@ -3185,6 +3185,7 @@ app.post('/admin/create-user', authRole(['admin','mainadmin']), async (req, res)
     res.status(500).json({ error: 'Create user failed' });
   }
 });
+
 
 
 
