@@ -4,3 +4,4 @@ data/
 pending_uploads/
 gallery/
 .env
+serviceAccountKey.json

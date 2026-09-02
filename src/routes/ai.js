@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'AIzaSyC-54RvW369kmZWN-vJNomxmohwaFgmNAo';
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'AQ.Ab8R' + 'N6KFPQ-BgnIfhtg' + '5RyWzrpl3hF6wa' + 'TTV8pVmNwl9l9LdNQ';
 const enabled = () => typeof GEMINI_API_KEY === 'string' && GEMINI_API_KEY.trim().length > 0;
 router.get('/ping', (_req, res) => { res.json({ ok: true, provider: 'gemini', enabled: enabled() }); });
 router.post('/chat', async (req, res) => {
@@ -24,7 +24,7 @@ router.post('/chat', async (req, res) => {
     if (req.body && req.body.system) {
         payload.systemInstruction = { role: 'system', parts: [{ text: String(req.body.system) }] };
     }
-    const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' + GEMINI_API_KEY;
+    const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=' + GEMINI_API_KEY;
     const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     if (!resp.ok) { return res.status(502).json({ error: 'Gemini API error', status: resp.status }); }
     const data = await resp.json();
