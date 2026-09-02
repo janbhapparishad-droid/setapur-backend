@@ -2872,7 +2872,7 @@ async function ensureCalendarEventsTable() {
   ];
 
   for (const f of festivals) {
-    await pool.query('INSERT INTO calendar_events (title, event_date, description) VALUES (, , ) ON CONFLICT DO NOTHING', [f.title, f.date, f.desc]).catch(e=>null);
+    await pool.query('INSERT INTO calendar_events (title, event_date, description) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [f.title, f.date, f.desc]).catch(e=>null);
   }
 }
 ensureCalendarEventsTable().catch(console.error);
@@ -3185,6 +3185,7 @@ app.post('/admin/create-user', authRole(['admin','mainadmin']), async (req, res)
     res.status(500).json({ error: 'Create user failed' });
   }
 });
+
 
 
 
