@@ -2817,7 +2817,7 @@ async function ensureCalendarEventsTable() {
       event_date DATE NOT NULL,
       description TEXT
     );
-  );
+  `);
   
   await pool.query('ALTER TABLE calendar_events ADD CONSTRAINT unique_title_date UNIQUE (title, event_date)').catch(e=>null);
 
@@ -3185,6 +3185,7 @@ app.post('/admin/create-user', authRole(['admin','mainadmin']), async (req, res)
     res.status(500).json({ error: 'Create user failed' });
   }
 });
+
 
 
 
