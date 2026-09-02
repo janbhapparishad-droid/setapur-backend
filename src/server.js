@@ -2810,7 +2810,7 @@ app.delete('/api/settings/barcode', authRole(['admin', 'mainadmin']), async (req
 // ----------------------------
 // --- CALENDAR EVENTS API ---
 async function ensureCalendarEventsTable() {
-  await pool.query(
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS calendar_events (
       id SERIAL PRIMARY KEY,
       title TEXT NOT NULL,
@@ -3185,6 +3185,7 @@ app.post('/admin/create-user', authRole(['admin','mainadmin']), async (req, res)
     res.status(500).json({ error: 'Create user failed' });
   }
 });
+
 
 
 
