@@ -1685,12 +1685,7 @@ app.get('/gallery/folders', authRole(['user', 'admin', 'mainadmin']), async (req
     const isAdmin = role === 'admin' || role === 'mainadmin';
     const includeDisabledQ = String(req.query.includeDisabled || '').toLowerCase();
     const includeDisabled = includeDisabledQ === '1' || includeDisabledQ === 'true';
-    let sql = 
-  SELECT f.slug, f.name, f.enabled, f.order_index, 
-         COALESCE(f.cover_url, (SELECT url FROM gallery_images WHERE folder_slug = f.slug ORDER BY id ASC LIMIT 1)) as cover_url,
-         f.icon_public_id, f.icon_key 
-  FROM gallery_folders f
-;
+    let sql = 'SELECT f.slug, f.name, f.enabled, f.order_index, COALESCE(f.cover_url, (SELECT url FROM gallery_images WHERE folder_slug = f.slug ORDER BY id ASC LIMIT 1)) as cover_url, f.icon_public_id, f.icon_key FROM gallery_folders f';
     const vals = [];
     if (!isAdmin && !includeDisabled) sql += ' WHERE enabled = true';
     sql += ' ORDER BY order_index ASC, lower(name) ASC';
@@ -3158,6 +3153,7 @@ app.post('/admin/create-user', authRole(['admin','mainadmin']), async (req, res)
     res.status(500).json({ error: 'Create user failed' });
   }
 });
+
 
 
 
