@@ -3019,7 +3019,7 @@ app.get('/api/analytics/charts', authRole(['admin', 'mainadmin']), async (req, r
 // --- SOCIAL LINKS API ---
 app.get('/api/settings/social-links', async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT value FROM global_settings WHERE key = ', ['social_links']);
+    const { rows } = await pool.query('SELECT value FROM global_settings WHERE key = $1', ['social_links']);
     if (rows.length > 0) {
       res.json({ links: JSON.parse(rows[0].value) });
     } else {
@@ -3034,7 +3034,7 @@ app.post('/api/settings/social-links', authRole(['admin', 'mainadmin']), async (
   try {
     const { links } = req.body;
     await pool.query(
-      'INSERT INTO global_settings (key, value) VALUES (\, \) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
+      'INSERT INTO global_settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
       ['social_links', JSON.stringify(links)]
     );
     res.json({ success: true, links });
