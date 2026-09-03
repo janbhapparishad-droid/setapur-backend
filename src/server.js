@@ -3133,6 +3133,8 @@ try {
 try {
   const aiRoutes = require("./routes/ai");
   app.use("/api/ai", authRole(["any"]), aiRoutes);
+  app.use("/api/tracking", trackingRoutes);
+  app.use("/api/admin/tracking", authRole(["admin", "mainadmin"]), adminTrackingRoutes);
 } catch (e) {
   console.warn('ai routes not mounted:', e.message);
 }
