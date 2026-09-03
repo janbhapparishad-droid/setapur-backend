@@ -3016,6 +3016,33 @@ app.get('/api/analytics/charts', authRole(['admin', 'mainadmin']), async (req, r
 });
 // ----------------------------
 // --- LIVE STREAM API ---
+// --- SOCIAL LINKS API ---
+app.get('/api/settings/social-links', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT value FROM global_settings WHERE key = ', ['social_links']);
+    if (rows.length > 0) {
+      res.json({ links: JSON.parse(rows[0].value) });
+    } else {
+      res.json({ links: [] });
+    }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/settings/social-links', authRole(['admin', 'mainadmin']), async (req, res) => {
+  try {
+    const { links } = req.body;
+    await pool.query(
+      'INSERT INTO global_settings (key, value) VALUES (\, \) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
+      ['social_links', JSON.stringify(links)]
+    );
+    res.json({ success: true, links });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/settings/live-stream', async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT value FROM global_settings WHERE key = $1', ['live_stream_url']);
