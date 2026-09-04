@@ -2622,25 +2622,14 @@ app.get('/totals', authRole(['user','admin','mainadmin']), async (req, res) => {
 /* ===================== NEW ANALYTICS SUMMARY ENDPOINT ===================== */
 app.get('/analytics/summary', authRole(['user','admin','mainadmin']), async (req, res) => {
   try {
-    // 1. Ensure all necessary tables exist
-    if (global.AnalyticsAdmin && global.AnalyticsAdmin.ensure) {
-        await global.AnalyticsAdmin.ensure();
-    }
     await ensureDonationsTable();
     await ensureExpensesTable();
+    await ensureCategoriesTable();
 
-    // 2. Fetch all ENABLED Folders and Events in order
-    const { rows: folders } = await pool.query(
-      'SELECT id, name FROM analytics_folders WHERE enabled=true ORDER BY order_index ASC, id ASC'
-    );
-    const { rows: eventsCfg } = await pool.query(
-      'SELECT id, folder_id, name, show_donation_detail, show_expense_detail FROM analytics_events WHERE enabled=true ORDER BY order_index ASC, id ASC'
-    );
     const { rows: categories } = await pool.query(
       'SELECT id, name FROM categories WHERE enabled=true ORDER BY order_index ASC, id ASC'
     );
 
-    // 3. Fetch actual financial data (Approved Donations & Approved+Enabled Expenses)
     const { rows: donations } = await pool.query(
       `SELECT amount, category, donor_name, date(created_at) as date, receipt_code, order_index
        FROM donations WHERE approved=true
@@ -2652,11 +2641,8 @@ app.get('/analytics/summary', authRole(['user','admin','mainadmin']), async (req
        ORDER BY order_index ASC NULLS LAST, COALESCE(date, created_at) DESC`
     );
 
-    // 4. Helper to normalize category names for matching
     const norm = (s) => String(s || '').trim().toLowerCase();
-
-    // 5. Pre-process data into maps for quick lookup by category name
-    const dataMap = new Map(); // cat -> { donationTotal, expenseTotal, donationsList:[] }
+    const dataMap = new Map();
 
     for (const d of donations) {
       const cat = norm(d.category);
@@ -2676,63 +2662,34 @@ app.get('/analytics/summary', authRole(['user','admin','mainadmin']), async (req
       dataMap.get(cat).expenseTotal += Number(e.amount || 0);
     }
 
-    // 6. Build the structured response for the User App
-    const response = folders.map(folder => {
-      const folderEvents = {};
-      const myEvents = eventsCfg.filter(e => e.folder_id === folder.id);
+    const allEvents = {};
+    for (const cat of categories) {
+      const catKey = norm(cat.name);
+      const data = dataMap.get(catKey) || { donationTotal: 0, expenseTotal: 0, donations: [] };
 
-      for (const ev of myEvents) {
-        const catKey = norm(ev.name);
-        const data = dataMap.get(catKey) || { donationTotal: 0, expenseTotal: 0, donations: [] };
-
-        folderEvents[ev.name] = {
-          donationTotal: data.donationTotal,
-          expenseTotal: data.expenseTotal,
-          balance: data.donationTotal - data.expenseTotal,
-          donations: data.donations,
-          config: {
-            showDonationDetail: ev.show_donation_detail,
-            showExpenseDetail: ev.show_expense_detail
-          }
-        };
-      }
-
-      return {
-        folderName: folder.name,
-        events: folderEvents
+      allEvents[cat.name] = {
+        donationTotal: data.donationTotal,
+        expenseTotal: data.expenseTotal,
+        balance: data.donationTotal - data.expenseTotal,
+        donations: data.donations,
+        config: {
+          showDonationDetail: true,
+          showExpenseDetail: true
+        }
       };
-    });
-
-    // Append unmapped categories
-    const mappedEventNames = new Set(eventsCfg.map(e => norm(e.name)));
-    const unmappedCategories = categories.filter(c => !mappedEventNames.has(norm(c.name)));
-
-    if (unmappedCategories.length > 0) {
-      const otherEvents = {};
-      for (const cat of unmappedCategories) {
-        const catKey = norm(cat.name);
-        const data = dataMap.get(catKey) || { donationTotal: 0, expenseTotal: 0, donations: [] };
-        otherEvents[cat.name] = {
-          donationTotal: data.donationTotal,
-          expenseTotal: data.expenseTotal,
-          balance: data.donationTotal - data.expenseTotal,
-          donations: data.donations,
-          config: { showDonationDetail: true, showExpenseDetail: true }
-        };
-      }
-      let otherFolder = response.find(f => f.folderName === 'Other Events' || f.folderName === 'Other');
-      if (otherFolder) {
-        Object.assign(otherFolder.events, otherEvents);
-      } else {
-        response.push({ folderName: 'Other Events', events: otherEvents });
-      }
     }
 
-    res.json(response);
+    const response = [
+      {
+        folderName: 'Events',
+        events: allEvents
+      }
+    ];
 
+    res.json(response);
   } catch (e) {
-    console.error('analytics summary error:', e);
-    res.status(500).send('Analytics summary failed');
+    console.error('Analytics summary error:', e);
+    res.status(500).json({ error: 'Failed to fetch analytics' });
   }
 });
 
