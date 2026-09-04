@@ -2577,11 +2577,9 @@ app.post('/ebooks/folders/reorder', authRole(['admin','mainadmin']), async (req,
 // Analytics-aware totals (Categories se independent; only Analytics Events/Folder enabled matter)
 app.get('/totals', authRole(['user','admin','mainadmin']), async (req, res) => {
   try {
-    if (global.AnalyticsAdmin?.ensure) await global.AnalyticsAdmin.ensure();
-    await ensureDonationsTable(); await ensureExpensesTable();
-
-    // Ensure helpful index
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_analytics_events_name_lower ON analytics_events ((lower(name)));`);
+    await ensureDonationsTable(); 
+    await ensureExpensesTable();
+    await ensureCategoriesTable();
 
     const dSql = `
       SELECT COALESCE(SUM(d.amount),0) AS total
@@ -2589,11 +2587,9 @@ app.get('/totals', authRole(['user','admin','mainadmin']), async (req, res) => {
       WHERE d.approved = true
         AND EXISTS (
           SELECT 1
-          FROM analytics_events ev
-          JOIN analytics_folders f ON f.id = ev.folder_id
-          WHERE ev.enabled = true
-            AND f.enabled = true
-            AND lower(trim(ev.name)) = lower(trim(d.category))
+          FROM categories c
+          WHERE c.enabled = true
+            AND lower(trim(c.name)) = lower(trim(d.category))
         )`;
     const eSql = `
       SELECT COALESCE(SUM(e.amount),0) AS total
@@ -2602,11 +2598,9 @@ app.get('/totals', authRole(['user','admin','mainadmin']), async (req, res) => {
         AND e.enabled = true
         AND EXISTS (
           SELECT 1
-          FROM analytics_events ev
-          JOIN analytics_folders f ON f.id = ev.folder_id
-          WHERE ev.enabled = true
-            AND f.enabled = true
-            AND lower(trim(ev.name)) = lower(trim(e.category))
+          FROM categories c
+          WHERE c.enabled = true
+            AND lower(trim(c.name)) = lower(trim(e.category))
         )`;
 
     const [{ rows: d }, { rows: e }] = await Promise.all([pool.query(dSql), pool.query(eSql)]);
