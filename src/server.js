@@ -3133,10 +3133,17 @@ try {
 try {
   const aiRoutes = require("./routes/ai");
   app.use("/api/ai", authRole(["any"]), aiRoutes);
-  app.use("/api/tracking", trackingRoutes);
-  app.use("/api/admin/tracking", authRole(["admin", "mainadmin"]), adminTrackingRoutes);
 } catch (e) {
   console.warn('ai routes not mounted:', e.message);
+}
+
+try {
+  const trackingRoutes = require("./routes/tracking");
+    const adminTrackingRoutes = require("./routes/adminTracking");
+    app.use("/api/tracking", trackingRoutes);
+    app.use("/api/admin/tracking", authRole(["admin", "mainadmin"]), adminTrackingRoutes);
+} catch (e) {
+  console.warn('tracking routes not mounted:', e.message);
 }
 
 const PORT = parseInt(process.env.PORT || '10000', 10);

@@ -1,28 +1,15 @@
-const express = require('express');
+admin_code = '''const express = require('express');
 const router = express.Router();
-const { Pool } = require('pg');
+const pool = require('../db');
 
-const useSSL = !!(
-  (process.env.DATABASE_URL && /sslmode=require|neon|render|amazonaws|\.neon\.tech/i.test(process.env.DATABASE_URL))
-  || process.env.PGSSL === '1'
-  || process.env.PGSSLMODE === 'require'
-);
-
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: useSSL ? { rejectUnauthorized: false } : false,
-});
-
-/* ======================= ADMIN TRACKING ROUTES ======================= */
-
-// Get Dashboard Summary Stats
+// Dashboard summary stats
 router.get('/dashboard', async (req, res) => {
   try {
     // Online users (active in last 5 mins)
     const { rows: onlineRes } = await pool.query("SELECT COUNT(*) FROM users WHERE last_active_at > now() - interval '5 minutes'");
     // Total users
     const { rows: totalUsersRes } = await pool.query("SELECT COUNT(*) FROM users");
-    // Unique devices active in last 30 days (approximation of active installs)
+    // Unique devices active in last 30 days
     const { rows: installsRes } = await pool.query("SELECT COUNT(DISTINCT device_id) FROM app_events WHERE created_at > now() - interval '30 days'");
 
     res.json({
@@ -35,10 +22,10 @@ router.get('/dashboard', async (req, res) => {
   }
 });
 
-// Get Users List with Status
+// Get User List for Tracking
 router.get('/users', async (req, res) => {
   try {
-    const { rows } = await pool.query(`
+    const { rows } = await pool.query(
       SELECT 
         u.id, 
         u.username, 
@@ -48,7 +35,7 @@ router.get('/users', async (req, res) => {
         (SELECT COUNT(*) FROM app_events WHERE user_id = u.id) as total_events
       FROM users u
       ORDER BY u.last_active_at DESC NULLS LAST
-    `);
+    );
     res.json(rows);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -59,13 +46,13 @@ router.get('/users', async (req, res) => {
 router.get('/user-activity/:userId', async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 100;
-    const { rows } = await pool.query(`
+    const { rows } = await pool.query(
       SELECT id, event_type, target, metadata, created_at 
       FROM app_events 
-      WHERE user_id = $1 
+      WHERE user_id = \ 
       ORDER BY created_at DESC 
-      LIMIT $2
-    `, [req.params.userId, limit]);
+      LIMIT \
+    , [req.params.userId, limit]);
     res.json(rows);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -73,3 +60,7 @@ router.get('/user-activity/:userId', async (req, res) => {
 });
 
 module.exports = router;
+'''
+
+with open('src/routes/adminTracking.js', 'w', encoding='utf-8') as f:
+    f.write(admin_code.replace('\', '').replace('\', ''))
