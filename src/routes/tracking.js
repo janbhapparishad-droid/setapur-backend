@@ -40,7 +40,7 @@ router.post('/heartbeat', async (req, res) => {
   try {
     const { userId, deviceId } = req.body;
     if (userId) {
-      await pool.query('UPDATE users SET last_active_at = now() WHERE id = ', [userId]);
+      await pool.query('UPDATE users SET last_active_at = now() WHERE id = $1', [userId]);
     }
     // Could also track active devices here if needed
     res.json({ success: true });
