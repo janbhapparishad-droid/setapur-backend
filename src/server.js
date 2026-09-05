@@ -1388,14 +1388,23 @@ app.get('/api/donations/all-donations', authRole(['admin', 'mainadmin']), async 
   await ensureDonationsTable();
   const role = req.user.role;
   const q = (req.query.q || req.query.search || '').toString().trim();
+  const cat = (req.query.category || '').toString().trim();
   let sql = 'SELECT * FROM donations';
   let vals = [];
+  let conds = [];
   if (q) {
-    sql += ` WHERE lower(coalesce(donor_name,'')) ILIKE lower($1)
-           OR lower(coalesce(donor_username,'')) ILIKE lower($1)
-           OR lower(coalesce(receipt_code,'')) ILIKE lower($1)
-           OR lower(coalesce(category,'')) ILIKE lower($1)`;
-    vals = [`%${q}%`];
+    vals.push(`%${q}%`);
+    conds.push(`(lower(coalesce(donor_name,'')) ILIKE lower($${vals.length})
+           OR lower(coalesce(donor_username,'')) ILIKE lower($${vals.length})
+           OR lower(coalesce(receipt_code,'')) ILIKE lower($${vals.length})
+           OR lower(coalesce(category,'')) ILIKE lower($${vals.length}))`);
+  }
+  if (cat) {
+    vals.push(cat);
+    conds.push(`lower(trim(category)) = lower(trim($${vals.length}))`);
+  }
+  if (conds.length > 0) {
+    sql += ' WHERE ' + conds.join(' AND ');
   }
   const sortOrder = await getDonationSortOrder();
   sql += ` ORDER BY order_index ASC NULLS LAST, amount ${sortOrder}, created_at DESC`;
