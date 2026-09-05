@@ -36,6 +36,13 @@ const uploadsDir = path.join(process.cwd(), 'uploads');
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 app.use('/uploads', express.static(uploadsDir));
 
+async function getDonationSortOrder() {
+  try {
+    const { rows } = await pool.query("SELECT value FROM global_settings WHERE key = 'donation_sort_order'");
+    return (rows.length > 0 && rows[0].value === 'ASC') ? 'ASC' : 'DESC';
+  } catch(e) { return 'DESC'; }
+}
+
 /* ===================== Postgres ===================== */
 const useSSL = !!(
   (process.env.DATABASE_URL && /sslmode=require|neon|render|amazonaws|\.neon\.tech/i.test(process.env.DATABASE_URL))
@@ -1356,7 +1363,8 @@ app.get('/api/donations/donations', authRole(['user','admin','mainadmin']), asyn
              OR lower(coalesce(category,'')) ILIKE lower($1)`;
       vals = [`%${q}%`];
     }
-    sql += ' ORDER BY order_index ASC NULLS LAST, created_at DESC';
+    const sortOrder = await getDonationSortOrder();
+  sql += ` ORDER BY order_index ASC NULLS LAST, amount ${sortOrder}, created_at DESC`;
     const { rows } = await pool.query(sql, vals);
     return res.json(rows.map(r => redactDonationForRole(rowToDonation(r), role)));
   }
@@ -1389,7 +1397,8 @@ app.get('/api/donations/all-donations', authRole(['admin', 'mainadmin']), async 
            OR lower(coalesce(category,'')) ILIKE lower($1)`;
     vals = [`%${q}%`];
   }
-  sql += ' ORDER BY order_index ASC NULLS LAST, created_at DESC';
+  const sortOrder = await getDonationSortOrder();
+  sql += ` ORDER BY order_index ASC NULLS LAST, amount ${sortOrder}, created_at DESC`;
   const { rows } = await pool.query(sql, vals);
   res.json(rows.map(r => redactDonationForRole(rowToDonation(r), role)));
 });
@@ -1566,10 +1575,11 @@ async function reorderDonations(donationId, direction, newIndex, category) {
     if (!rows.length) return;
     category = rows[0].category;
   }
+  const sortOrder = await getDonationSortOrder();
   const { rows } = await pool.query(
     `SELECT id FROM donations
      WHERE lower(trim(category)) = lower(trim($1))
-     ORDER BY order_index ASC NULLS LAST, created_at DESC, id ASC`, [category]
+     ORDER BY order_index ASC NULLS LAST, amount ${sortOrder}, created_at DESC, id ASC`, [category]
   );
   let list = rows.map(r => r.id);
   let idx = list.indexOf(Number(donationId));
@@ -1592,7 +1602,20 @@ async function reorderDonations(donationId, direction, newIndex, category) {
     await pool.query('ROLLBACK'); throw e;
   }
 }
-app.post('/admin/donations/:id/reorder', authRole(['admin','mainadmin']), async (req, res) => {
+app.post('/admin/donations/reset-order', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    const { category } = req.body;
+    let sql = 'UPDATE donations SET order_index = NULL';
+    let vals = [];
+    if (category) {
+      sql += ' WHERE lower(trim(category)) = lower(trim($1))';
+      vals = [category];
+    }
+    await pool.query(sql, vals);
+    res.json({ ok: true });
+  } catch(e) { console.error(e); res.status(500).send('Reset failed'); }
+});
+  app.post('/admin/donations/:id/reorder', authRole(['admin','mainadmin']), async (req, res) => {
   try {
     const { id } = req.params;
     const { direction, newIndex, category } = req.body || {};
@@ -2624,10 +2647,11 @@ app.get('/analytics/summary', authRole(['user','admin','mainadmin']), async (req
       'SELECT id, name FROM categories WHERE enabled=true ORDER BY order_index ASC, id ASC'
     );
 
+    const sortOrder = await getDonationSortOrder();
     const { rows: donations } = await pool.query(
       `SELECT amount, category, donor_name, date(created_at) as date, receipt_code, order_index
        FROM donations WHERE approved=true
-       ORDER BY order_index ASC NULLS LAST, created_at DESC`
+       ORDER BY order_index ASC NULLS LAST, amount ${sortOrder}, created_at DESC`
     );
     const { rows: expenses } = await pool.query(
       `SELECT amount, category, description, date, order_index
@@ -3022,7 +3046,26 @@ app.post('/api/settings/social-links', authRole(['admin', 'mainadmin']), async (
   }
 });
 
-app.get('/api/settings/live-stream', async (req, res) => {
+
+  app.get('/api/settings/donation-sort', authRole(['user','admin','mainadmin']), async (req, res) => {
+    try {
+      const order = await getDonationSortOrder();
+      res.json({ sortOrder: order });
+    } catch(e) { res.status(500).json({error: e.message}); }
+  });
+  app.post('/api/settings/donation-sort', authRole(['admin', 'mainadmin']), async (req, res) => {
+    try {
+      const { sortOrder } = req.body;
+      const val = (sortOrder === 'ASC') ? 'ASC' : 'DESC';
+      await pool.query(
+        "INSERT INTO global_settings (key, value) VALUES ('donation_sort_order', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        [val]
+      );
+      res.json({ success: true, sortOrder: val });
+    } catch(e) { res.status(500).json({error: e.message}); }
+  });
+
+  app.get('/api/settings/live-stream', async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT value FROM global_settings WHERE key = $1', ['live_stream_url']);
     res.json({ url: rows.length > 0 ? rows[0].value : null });
