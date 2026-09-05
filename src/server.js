@@ -502,7 +502,8 @@ async function ensureExpensesTable() {
       ADD COLUMN IF NOT EXISTS approved_by TEXT,
       ADD COLUMN IF NOT EXISTS approved_by_id INT,
       ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ,
-      ADD COLUMN IF NOT EXISTS order_index INT;
+      ADD COLUMN IF NOT EXISTS order_index INT,
+      ADD COLUMN IF NOT EXISTS global_order_index INT;
     CREATE INDEX IF NOT EXISTS idx_expenses_cat ON expenses (lower(category));
     CREATE INDEX IF NOT EXISTS idx_expenses_approved_enabled ON expenses (approved, enabled);
   `);
@@ -535,7 +536,8 @@ async function ensureDonationsTable() {
       ADD COLUMN IF NOT EXISTS approved_by_role TEXT,
       ADD COLUMN IF NOT EXISTS approved_by_name TEXT,
       ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ,
-      ADD COLUMN IF NOT EXISTS order_index INT;
+      ADD COLUMN IF NOT EXISTS order_index INT,
+      ADD COLUMN IF NOT EXISTS global_order_index INT;
     CREATE INDEX IF NOT EXISTS idx_donations_cat ON donations (lower(category));
     CREATE INDEX IF NOT EXISTS idx_donations_approved ON donations (approved);
     CREATE INDEX IF NOT EXISTS idx_donations_created ON donations (created_at);
@@ -1579,17 +1581,30 @@ app.put('/api/donations/:id', authRole(['admin', 'mainadmin']), handleDonationUp
 
 // Reorder Donations per-category
 async function reorderDonations(donationId, direction, newIndex, category) {
-  if (!category) {
+  const isGlobal = category === '__GLOBAL__';
+  if (!isGlobal && !category) {
     const { rows } = await pool.query(`SELECT category FROM donations WHERE id=$1`, [donationId]);
     if (!rows.length) return;
     category = rows[0].category;
   }
   const sortOrder = await getDonationSortOrder();
-  const { rows } = await pool.query(
-    `SELECT id FROM donations
-     WHERE lower(trim(category)) = lower(trim($1))
-     ORDER BY order_index ASC NULLS LAST, amount ${sortOrder}, created_at DESC, id ASC`, [category]
-  );
+  
+  let rows;
+  if (isGlobal) {
+    const res = await pool.query(
+      `SELECT id FROM donations
+       WHERE approved=true
+       ORDER BY global_order_index ASC NULLS LAST, amount ${sortOrder}, created_at DESC, id ASC`
+    );
+    rows = res.rows;
+  } else {
+    const res = await pool.query(
+      `SELECT id FROM donations
+       WHERE lower(trim(category)) = lower(trim($1))
+       ORDER BY order_index ASC NULLS LAST, amount ${sortOrder}, created_at DESC, id ASC`, [category]
+    );
+    rows = res.rows;
+  }
   let list = rows.map(r => r.id);
   let idx = list.indexOf(Number(donationId));
   if (idx === -1) return;
@@ -1604,7 +1619,11 @@ async function reorderDonations(donationId, direction, newIndex, category) {
   await pool.query('BEGIN');
   try {
     for (let i=0;i<list.length;i++) {
-      await pool.query('UPDATE donations SET order_index=$1 WHERE id=$2', [i, list[i]]);
+      if (isGlobal) {
+        await pool.query('UPDATE donations SET global_order_index=$1 WHERE id=$2', [i, list[i]]);
+      } else {
+        await pool.query('UPDATE donations SET order_index=$1 WHERE id=$2', [i, list[i]]);
+      }
     }
     await pool.query('COMMIT');
   } catch(e) {
@@ -1614,11 +1633,16 @@ async function reorderDonations(donationId, direction, newIndex, category) {
 app.post('/admin/donations/reset-order', authRole(['admin','mainadmin']), async (req, res) => {
   try {
     const { category } = req.body;
-    let sql = 'UPDATE donations SET order_index = NULL';
+    let sql;
     let vals = [];
-    if (category) {
-      sql += ' WHERE lower(trim(category)) = lower(trim($1))';
-      vals = [category];
+    if (category === '__GLOBAL__') {
+      sql = 'UPDATE donations SET global_order_index = NULL';
+    } else {
+      sql = 'UPDATE donations SET order_index = NULL';
+      if (category) {
+        sql += ' WHERE lower(trim(category)) = lower(trim($1))';
+        vals = [category];
+      }
     }
     await pool.query(sql, vals);
     res.json({ ok: true });
@@ -2646,6 +2670,19 @@ app.get('/totals', authRole(['user','admin','mainadmin']), async (req, res) => {
 });
 
 /* ===================== NEW ANALYTICS SUMMARY ENDPOINT ===================== */
+app.get('/analytics/all-donations', authRole(['user','admin','mainadmin']), async (req, res) => {
+  try {
+    await ensureDonationsTable();
+    const sortOrder = await getDonationSortOrder();
+    const { rows } = await pool.query(
+      `SELECT amount, category, donor_name, date(created_at) as date, receipt_code, order_index, global_order_index
+       FROM donations WHERE approved=true
+       ORDER BY global_order_index ASC NULLS LAST, amount ${sortOrder}, created_at DESC`
+    );
+    res.json(rows);
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+
 app.get('/analytics/summary', authRole(['user','admin','mainadmin']), async (req, res) => {
   try {
     await ensureDonationsTable();
