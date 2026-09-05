@@ -331,7 +331,7 @@ app.post('/auth/login', async (req, res) => {
 
   user.loggedIn = deviceId; await saveUsers(users);
   const cleanRole = normRole(user.role || 'user');
-  const token = jwt.sign({ id: user.id, username: user.username, role: cleanRole }, SECRET_KEY, { expiresIn: '8h' });
+  const token = jwt.sign({ id: user.id, username: user.username, role: cleanRole }, SECRET_KEY);
   res.json({ token });
 });
 
