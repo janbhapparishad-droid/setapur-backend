@@ -3065,7 +3065,15 @@ app.post('/api/notifications', authRole(['admin', 'mainadmin']), async (req, res
 
     const message = {
       notification: { title, body },
-      topic: 'all_users'
+      topic: 'all_users',
+      android: {
+        priority: 'high'
+      },
+      apns: {
+        payload: {
+          aps: { sound: 'default' }
+        }
+      }
     };
     if (imageUrl) message.notification.imageUrl = imageUrl;
 
