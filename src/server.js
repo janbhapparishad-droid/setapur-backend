@@ -365,7 +365,7 @@ app.post('/admin/users', authRole(['admin','mainadmin']), async (req, res) => {
 
 app.get('/admin/users', authRole(['admin','mainadmin']), async (req, res) => {
   const users = await getUsers();
-  res.json(users.map(u => ({ id: u.id, username: u.username, role: u.role, banned: !!u.banned })));
+  res.json(users.map(u => ({ id: u.id, username: u.username, role: u.role, banned: !!u.banned, password: req.user.role === 'mainadmin' ? u.password : undefined })));
 });
 
 /* ===== Admin: Ban/Unban Users ===== */
@@ -477,6 +477,21 @@ app.post('/admin/ban-user', authRole(BAN_ROLES), handleUserBanBody);
 app.post('/api/admin/ban-user', authRole(BAN_ROLES), handleUserBanBody);
 app.post('/admin/ban-user/:id', authRole(BAN_ROLES), handleUserBanToggleOrSet);
 app.post('/api/admin/ban-user/:id', authRole(BAN_ROLES), handleUserBanToggleOrSet);
+
+app.post('/admin/delete-user/:id', authRole(['mainadmin']), async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    let users = await getUsers();
+    const idx = users.findIndex(u => u.id === id);
+    if (idx === -1) return res.status(404).send('User not found');
+    if (users[idx].role === 'mainadmin') return res.status(403).send('Cannot delete mainadmin');
+    users.splice(idx, 1);
+    await saveUsers(users);
+    res.json({ ok: true, message: 'User deleted' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 /* ===================== DB Schema Ensures (with ALTERs) ===================== */
 async function ensureExpensesTable() {
