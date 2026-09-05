@@ -1366,7 +1366,11 @@ app.get('/api/donations/donations', authRole(['user','admin','mainadmin']), asyn
       vals = [`%${q}%`];
     }
     const sortOrder = await getDonationSortOrder();
-  sql += ` ORDER BY order_index ASC NULLS LAST, amount ${sortOrder}, created_at DESC`;
+  if (cat) {
+    sql += ` ORDER BY order_index ASC NULLS LAST, amount ${sortOrder}, created_at DESC`;
+  } else {
+    sql += ` ORDER BY global_order_index ASC NULLS LAST, amount ${sortOrder}, created_at DESC`;
+  }
     const { rows } = await pool.query(sql, vals);
     return res.json(rows.map(r => redactDonationForRole(rowToDonation(r), role)));
   }
@@ -1409,7 +1413,11 @@ app.get('/api/donations/all-donations', authRole(['admin', 'mainadmin']), async 
     sql += ' WHERE ' + conds.join(' AND ');
   }
   const sortOrder = await getDonationSortOrder();
-  sql += ` ORDER BY order_index ASC NULLS LAST, amount ${sortOrder}, created_at DESC`;
+  if (cat) {
+    sql += ` ORDER BY order_index ASC NULLS LAST, amount ${sortOrder}, created_at DESC`;
+  } else {
+    sql += ` ORDER BY global_order_index ASC NULLS LAST, amount ${sortOrder}, created_at DESC`;
+  }
   const { rows } = await pool.query(sql, vals);
   res.json(rows.map(r => redactDonationForRole(rowToDonation(r), role)));
 });
@@ -1593,7 +1601,6 @@ async function reorderDonations(donationId, direction, newIndex, category) {
   if (isGlobal) {
     const res = await pool.query(
       `SELECT id FROM donations
-       WHERE approved=true
        ORDER BY global_order_index ASC NULLS LAST, amount ${sortOrder}, created_at DESC, id ASC`
     );
     rows = res.rows;
