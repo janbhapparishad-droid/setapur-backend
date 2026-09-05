@@ -2713,7 +2713,7 @@ app.get('/analytics/all-donations', authRole(['user','admin','mainadmin']), asyn
     await ensureDonationsTable();
     const sortOrder = await getDonationSortOrder();
     const { rows } = await pool.query(
-      `SELECT amount, category, donor_name, date(created_at) as date, receipt_code, order_index, global_order_index
+      `SELECT amount, category, donor_name as "donorName", date(created_at) as date, receipt_code as "receiptCode", order_index, global_order_index
        FROM donations WHERE approved=true
        ORDER BY global_order_index ASC NULLS LAST, amount ${sortOrder}, created_at DESC`
     );
