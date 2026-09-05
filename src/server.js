@@ -478,6 +478,22 @@ app.post('/api/admin/ban-user', authRole(BAN_ROLES), handleUserBanBody);
 app.post('/admin/ban-user/:id', authRole(BAN_ROLES), handleUserBanToggleOrSet);
 app.post('/api/admin/ban-user/:id', authRole(BAN_ROLES), handleUserBanToggleOrSet);
 
+app.post('/admin/reset-password/:id', authRole(['mainadmin']), async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const { newPassword } = req.body;
+    if (!newPassword || newPassword.trim() === '') {
+      return res.status(400).send('New password is required');
+    }
+    const hash = bcrypt.hashSync(newPassword.trim(), 10);
+    const result = await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2 RETURNING id', [hash, id]);
+    if (result.rowCount === 0) return res.status(404).send('User not found');
+    res.json({ ok: true, message: 'Password reset successful' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/admin/delete-user/:id', authRole(['mainadmin']), async (req, res) => {
   try {
     const id = parseInt(req.params.id);
