@@ -3031,6 +3031,33 @@ app.get('/api/notifications', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+app.put('/api/notifications/:id', authRole(['admin', 'mainadmin']), async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const { title, body, imageUrl } = req.body;
+    if (!title || !body) return res.status(400).json({ error: 'Title and Body are required' });
+    const result = await pool.query(
+      'UPDATE push_notifications SET title = $1, body = $2, image_url = $3 WHERE id = $4 RETURNING id',
+      [title, body, imageUrl || null, id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Notification not found' });
+    res.json({ success: true, message: 'Notification updated in history' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/api/notifications/:id', authRole(['admin', 'mainadmin']), async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const result = await pool.query('DELETE FROM push_notifications WHERE id = $1 RETURNING id', [id]);
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Notification not found' });
+    res.json({ success: true, message: 'Notification deleted' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/api/notifications', authRole(['admin', 'mainadmin']), async (req, res) => {
   try {
     const { title, body, imageUrl } = req.body;
