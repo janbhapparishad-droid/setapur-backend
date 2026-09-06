@@ -1042,14 +1042,16 @@ app.get('/api/expenses/list', authRole(['user','admin','mainadmin']), async (req
 
       let sql = 'SELECT * FROM expenses';
       if (where.length) sql += ' WHERE ' + where.join(' AND ');
-      sql += ' ORDER BY order_index ASC NULLS LAST, COALESCE(date, created_at) DESC';
+      if (q) sql += ' ORDER BY order_index ASC NULLS LAST, COALESCE(date, created_at) DESC';
+      else sql += ' ORDER BY global_order_index ASC NULLS LAST, COALESCE(date, created_at) DESC';
       const { rows } = await pool.query(sql, values);
       return res.json(rows.map(rowToExpense));
     } else {
       // approved+enabled
       let sql = `SELECT * FROM expenses WHERE approved = true AND enabled = true`;
       if (where.length) sql += ' AND ' + where.join(' AND ');
-      sql += ' ORDER BY order_index ASC NULLS LAST, COALESCE(date, created_at) DESC';
+      if (q) sql += ' ORDER BY order_index ASC NULLS LAST, COALESCE(date, created_at) DESC';
+      else sql += ' ORDER BY global_order_index ASC NULLS LAST, COALESCE(date, created_at) DESC';
       const { rows: approvedEnabled } = await pool.query(sql, values);
       let list = approvedEnabled.map(rowToExpense);
 
@@ -1237,16 +1239,28 @@ app.delete('/api/expenses/:id', authRole(['admin','mainadmin']), async (req, res
 
 // Reorder Expenses per-category
 async function reorderExpenses(expenseId, direction, newIndex, category) {
-  if (!category) {
-    const { rows } = await pool.query(`SELECT category FROM expenses WHERE id=$1`, [expenseId]);
-    if (!rows.length) return;
-    category = rows[0].category;
+  const isGlobal = category === '__GLOBAL__';
+  let rows;
+  if (isGlobal) {
+    const res = await pool.query(
+      `SELECT id FROM expenses
+       ORDER BY global_order_index ASC NULLS LAST, COALESCE(date, created_at) DESC, id ASC`
+    );
+    rows = res.rows;
+  } else {
+    if (!category) {
+      const catRes = await pool.query(`SELECT category FROM expenses WHERE id=$1`, [expenseId]);
+      if (!catRes.rows.length) return;
+      category = catRes.rows[0].category;
+    }
+    const res = await pool.query(
+      `SELECT id FROM expenses
+       WHERE lower(trim(category)) = lower(trim($1))
+       ORDER BY order_index ASC NULLS LAST, COALESCE(date, created_at) DESC, id ASC`, [category]
+    );
+    rows = res.rows;
   }
-  const { rows } = await pool.query(
-    `SELECT id FROM expenses
-     WHERE lower(trim(category)) = lower(trim($1))
-     ORDER BY order_index ASC NULLS LAST, COALESCE(date, created_at) DESC, id ASC`, [category]
-  );
+  
   let list = rows.map(r => r.id);
   let idx = list.indexOf(Number(expenseId));
   if (idx === -1) return;
@@ -1257,11 +1271,22 @@ async function reorderExpenses(expenseId, direction, newIndex, category) {
     [list[idx-1], list[idx]] = [list[idx], list[idx-1]];
   } else if (direction === 'down' && idx < list.length - 1) {
     [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
+  } else if (direction === 'top' && idx > 0) {
+    const item = list.splice(idx, 1)[0];
+    list.unshift(item);
+  } else if (direction === 'bottom' && idx < list.length - 1) {
+    const item = list.splice(idx, 1)[0];
+    list.push(item);
   }
+  
   await pool.query('BEGIN');
   try {
     for (let i=0;i<list.length;i++) {
-      await pool.query('UPDATE expenses SET order_index=$1 WHERE id=$2', [i, list[i]]);
+      if (isGlobal) {
+        await pool.query('UPDATE expenses SET global_order_index=$1 WHERE id=$2', [i, list[i]]);
+      } else {
+        await pool.query('UPDATE expenses SET order_index=$1 WHERE id=$2', [i, list[i]]);
+      }
     }
     await pool.query('COMMIT');
   } catch(e) {
@@ -1668,6 +1693,22 @@ async function reorderDonations(donationId, direction, newIndex, category) {
     await pool.query('ROLLBACK'); throw e;
   }
 }
+app.post('/admin/expenses/reset-order', authRole(['admin','mainadmin']), async (req, res) => {
+  try {
+    const { category } = req.body || {};
+    if (category === '__GLOBAL__') {
+      await pool.query('UPDATE expenses SET global_order_index = NULL');
+    } else if (category) {
+      await pool.query('UPDATE expenses SET order_index = NULL WHERE lower(trim(category)) = lower(trim($1))', [category]);
+    } else {
+      await pool.query('UPDATE expenses SET order_index = NULL');
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).send('Reset failed');
+  }
+});
+
 app.post('/admin/donations/reset-order', authRole(['admin','mainadmin']), async (req, res) => {
   try {
     const { category } = req.body;
