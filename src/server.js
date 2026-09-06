@@ -1727,7 +1727,19 @@ app.post('/admin/donations/reset-order', authRole(['admin','mainadmin']), async 
     res.json({ ok: true });
   } catch(e) { console.error(e); res.status(500).send('Reset failed'); }
 });
-  app.post('/admin/donations/:id/reorder', authRole(['admin','mainadmin']), async (req, res) => {
+  app.delete('/api/donations/:id', authRole(['admin', 'mainadmin']), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { rowCount } = await pool.query('DELETE FROM donations WHERE id = $1', [id]);
+    if (rowCount === 0) return res.status(404).json({ error: 'Donation not found' });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('DELETE donation error:', err);
+    res.status(500).json({ error: 'Failed to delete donation' });
+  }
+});
+
+app.post('/admin/donations/:id/reorder', authRole(['admin','mainadmin']), async (req, res) => {
   try {
     const { id } = req.params;
     const { direction, newIndex, category } = req.body || {};
