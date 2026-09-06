@@ -2722,9 +2722,10 @@ app.get('/totals', authRole(['user','admin','mainadmin']), async (req, res) => {
       WHERE d.approved = true
         AND EXISTS (
           SELECT 1
-          FROM categories c
-          WHERE c.enabled = true
-            AND lower(trim(c.name)) = lower(trim(d.category))
+          FROM analytics_events e
+          JOIN analytics_folders f ON e.folder_id = f.id
+          WHERE e.enabled = true AND f.enabled = true
+            AND lower(trim(e.name)) = lower(trim(d.category))
         )`;
     const eSql = `
       SELECT COALESCE(SUM(e.amount),0) AS total
@@ -2733,9 +2734,10 @@ app.get('/totals', authRole(['user','admin','mainadmin']), async (req, res) => {
         AND e.enabled = true
         AND EXISTS (
           SELECT 1
-          FROM categories c
-          WHERE c.enabled = true
-            AND lower(trim(c.name)) = lower(trim(e.category))
+          FROM analytics_events a
+          JOIN analytics_folders f ON a.folder_id = f.id
+          WHERE a.enabled = true AND f.enabled = true
+            AND lower(trim(a.name)) = lower(trim(e.category))
         )`;
 
     const [{ rows: d }, { rows: e }] = await Promise.all([pool.query(dSql), pool.query(eSql)]);
@@ -2805,29 +2807,42 @@ app.get('/analytics/summary', authRole(['user','admin','mainadmin']), async (req
       dataMap.get(cat).expenseTotal += Number(e.amount || 0);
     }
 
-    const allEvents = {};
-    for (const cat of categories) {
-      const catKey = norm(cat.name);
-      const data = dataMap.get(catKey) || { donationTotal: 0, expenseTotal: 0, donations: [] };
+    // Fetch folders and events
+    const { rows: folders } = await pool.query(
+      'SELECT id, name FROM analytics_folders WHERE enabled=true ORDER BY order_index ASC, lower(name) ASC'
+    );
+    const { rows: allEventsList } = await pool.query(
+      'SELECT folder_id, name, show_donation_detail, show_expense_detail FROM analytics_events WHERE enabled=true ORDER BY order_index ASC, id ASC'
+    );
 
-      allEvents[cat.name] = {
-        donationTotal: data.donationTotal,
-        expenseTotal: data.expenseTotal,
-        balance: data.donationTotal - data.expenseTotal,
-        donations: data.donations,
-        config: {
-          showDonationDetail: true,
-          showExpenseDetail: true
-        }
-      };
-    }
-
-    const response = [
-      {
-        folderName: 'Events',
-        events: allEvents
+    const response = [];
+    
+    for (const folder of folders) {
+      const folderEvents = allEventsList.filter(e => e.folder_id === folder.id);
+      if (folderEvents.length === 0) continue;
+      
+      const eventsObj = {};
+      for (const ev of folderEvents) {
+        const evKey = norm(ev.name);
+        const data = dataMap.get(evKey) || { donationTotal: 0, expenseTotal: 0, donations: [] };
+        
+        eventsObj[ev.name] = {
+          donationTotal: data.donationTotal,
+          expenseTotal: data.expenseTotal,
+          balance: data.donationTotal - data.expenseTotal,
+          donations: data.donations,
+          config: {
+            showDonationDetail: Boolean(ev.show_donation_detail),
+            showExpenseDetail: Boolean(ev.show_expense_detail)
+          }
+        };
       }
-    ];
+      
+      response.push({
+        folderName: folder.name,
+        events: eventsObj
+      });
+    }
 
     res.json(response);
   } catch (e) {
