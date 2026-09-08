@@ -1639,6 +1639,7 @@ async function handleDonationUpdate(req, res) {
     if (typeof body.paymentMethod === 'string') { fields.push(`payment_method = $${idx++}`); vals.push(body.paymentMethod.trim()); }
     if (typeof body.cashReceiverName === 'string') { fields.push(`cash_receiver_name = $${idx++}`); vals.push(body.cashReceiverName.trim()); }
     if (typeof body.orderIndex === 'number') { fields.push(`order_index = $${idx++}`); vals.push(Number(body.orderIndex)); }
+    if (body.createdAt) { fields.push(`created_at = $${idx++}`); vals.push(new Date(body.createdAt)); }
 
     if (typeof body.receiptCode === 'string' && body.receiptCode.trim()) {
       const rc = body.receiptCode.trim().toUpperCase();
