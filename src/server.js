@@ -151,6 +151,12 @@ if (!global.AnalyticsAdmin.reorderFolders) {
       [list[idx-1], list[idx]] = [list[idx], list[idx-1]];
     } else if (direction === 'down' && idx < list.length - 1) {
       [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
+    } else if (direction === 'top' && idx > 0) {
+      const item = list.splice(idx, 1)[0];
+      list.unshift(item);
+    } else if (direction === 'bottom' && idx < list.length - 1) {
+      const item = list.splice(idx, 1)[0];
+      list.push(item);
     }
     for (let i=0;i<list.length;i++) {
       await pool.query('UPDATE analytics_folders SET order_index=$1 WHERE id=$2', [i, list[i]]);
@@ -170,6 +176,12 @@ if (!global.AnalyticsAdmin.reorderEvents) {
       [list[idx-1], list[idx]] = [list[idx], list[idx-1]];
     } else if (direction === 'down' && idx < list.length - 1) {
       [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
+    } else if (direction === 'top' && idx > 0) {
+      const item = list.splice(idx, 1)[0];
+      list.unshift(item);
+    } else if (direction === 'bottom' && idx < list.length - 1) {
+      const item = list.splice(idx, 1)[0];
+      list.push(item);
     }
     for (let i=0;i<list.length;i++) {
       await pool.query('UPDATE analytics_events SET order_index=$1 WHERE id=$2', [i, list[i]]);
@@ -974,6 +986,12 @@ async function reorderCategories(id, direction, newIndex) {
       [list[idx-1], list[idx]] = [list[idx], list[idx-1]];
     } else if (direction === 'down' && idx < list.length - 1) {
       [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
+    } else if (direction === 'top' && idx > 0) {
+      const item = list.splice(idx, 1)[0];
+      list.unshift(item);
+    } else if (direction === 'bottom' && idx < list.length - 1) {
+      const item = list.splice(idx, 1)[0];
+      list.push(item);
     }
   };
   move();
@@ -1271,6 +1289,12 @@ async function reorderExpenses(expenseId, direction, newIndex, category) {
     [list[idx-1], list[idx]] = [list[idx], list[idx-1]];
   } else if (direction === 'down' && idx < list.length - 1) {
     [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
+  } else if (direction === 'top' && idx > 0) {
+    const item = list.splice(idx, 1)[0];
+    list.unshift(item);
+  } else if (direction === 'bottom' && idx < list.length - 1) {
+    const item = list.splice(idx, 1)[0];
+    list.push(item);
   } else if (direction === 'top' && idx > 0) {
     const item = list.splice(idx, 1)[0];
     list.unshift(item);
@@ -1678,6 +1702,12 @@ async function reorderDonations(donationId, direction, newIndex, category) {
     [list[idx-1], list[idx]] = [list[idx], list[idx-1]];
   } else if (direction === 'down' && idx < list.length - 1) {
     [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
+  } else if (direction === 'top' && idx > 0) {
+    const item = list.splice(idx, 1)[0];
+    list.unshift(item);
+  } else if (direction === 'bottom' && idx < list.length - 1) {
+    const item = list.splice(idx, 1)[0];
+    list.push(item);
   }
   await pool.query('BEGIN');
   try {
@@ -2701,6 +2731,12 @@ async function reorderEbookFolders(slug, direction, newIndex) {
     [list[idx-1], list[idx]] = [list[idx], list[idx-1]];
   } else if (direction === 'down' && idx < list.length - 1) {
     [list[idx+1], list[idx]] = [list[idx], list[idx+1]];
+  } else if (direction === 'top' && idx > 0) {
+    const item = list.splice(idx, 1)[0];
+    list.unshift(item);
+  } else if (direction === 'bottom' && idx < list.length - 1) {
+    const item = list.splice(idx, 1)[0];
+    list.push(item);
   }
   await pool.query('BEGIN');
   try {
